@@ -1,16 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { FileText, Plus, Trash2 } from "lucide-react";
+import { FileText, Info, Plus, Trash2 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import type {
-  Agent,
-  AgentRuntime,
-  AgentSkillsLocal,
-} from "@multica/core/types";
+import type { Agent } from "@multica/core/types";
 import { api } from "@multica/core/api";
-import { isSkillsLocalSupportedProvider } from "@multica/core/agents";
 import { useWorkspaceId } from "@multica/core/hooks";
 import {
   skillListOptions,
@@ -18,33 +13,16 @@ import {
 } from "@multica/core/workspace/queries";
 import { Button } from "@multica/ui/components/ui/button";
 import { SkillAddDialog } from "../skill-add-dialog";
-import { SkillsLocalToggle } from "../skills-local-toggle";
 import { useT } from "../../../i18n";
 
 export function SkillsTab({
   agent,
-  runtime,
 }: {
   agent: Agent;
-  /**
-   * The runtime this agent is bound to, if known. Used to decide whether
-   * the host-skill merge toggle is meaningful for this agent — only Claude
-   * and Codex runtimes honour `skills_local` today (MUL-2603). When the
-   * runtime is missing (parent couldn't resolve it, e.g. it was deleted)
-   * the toggle is hidden — there is no usable provider context to gate on.
-   */
-  runtime?: AgentRuntime | null;
 }) {
   const { t } = useT("agents");
   const qc = useQueryClient();
   const wsId = useWorkspaceId();
-  // Default missing values to "merge". Older backends omit the field
-  // entirely; the documented platform default wins on drift (see
-  // AgentSkillsLocal — "ignore" is the explicit hardening opt-in).
-  const currentSkillsLocal: AgentSkillsLocal =
-    agent.skills_local === "ignore" ? "ignore" : "merge";
-  const [skillsLocalSaving, setSkillsLocalSaving] = useState(false);
-  const skillsLocalApplies = isSkillsLocalSupportedProvider(runtime?.provider);
   // Same query the SkillAddDialog uses (TanStack Query dedupes by key, so
   // this isn't an extra request) — used here only to grey out the "Add
   // skill" button when the workspace has zero skills total. When skills
@@ -55,24 +33,6 @@ export function SkillsTab({
   const { data: workspaceSkills = [] } = useQuery(skillListOptions(wsId));
   const [removing, setRemoving] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
-
-  const handleSkillsLocalChange = async (next: AgentSkillsLocal) => {
-    if (next === currentSkillsLocal || skillsLocalSaving) return;
-    setSkillsLocalSaving(true);
-    try {
-      await api.updateAgent(agent.id, { skills_local: next });
-      qc.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });
-      toast.success(t(($) => $.tab_body.skills.local_saved_toast));
-    } catch (e) {
-      toast.error(
-        e instanceof Error
-          ? e.message
-          : t(($) => $.tab_body.skills.local_save_failed_toast),
-      );
-    } finally {
-      setSkillsLocalSaving(false);
-    }
-  };
 
   const handleRemove = async (skillId: string) => {
     setRemoving(true);
@@ -91,7 +51,7 @@ export function SkillsTab({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-start justify-between gap-3">
         <p className="text-xs text-muted-foreground">
           {t(($) => $.tab_body.skills.intro)}
         </p>
@@ -107,15 +67,12 @@ export function SkillsTab({
         </Button>
       </div>
 
-      {skillsLocalApplies && (
-        <SkillsLocalToggle
-          value={currentSkillsLocal}
-          onChange={handleSkillsLocalChange}
-          disabled={skillsLocalSaving}
-          hintScope="tab"
-        />
-      )}
-
+      <div className="flex items-start gap-2 rounded-md border border-info/20 bg-info/5 px-3 py-2.5">
+        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
+        <p className="text-xs text-muted-foreground">
+          {t(($) => $.tab_body.skills.import_hint)}
+        </p>
+      </div>
 
       {agent.skills.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-12">

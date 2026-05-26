@@ -7,14 +7,12 @@ import { ModelDropdown } from "./model-dropdown";
 import { RuntimePicker, isRuntimeUsableForUser } from "./runtime-picker";
 import { InstructionsEditor } from "./instructions-editor";
 import { SkillMultiSelect } from "./skill-multi-select";
-import { SkillsLocalToggle } from "./skills-local-toggle";
 import { AvatarPicker } from "./avatar-picker";
 import { api } from "@multica/core/api";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { workspaceKeys } from "@multica/core/workspace/queries";
 import type {
   Agent,
-  AgentSkillsLocal,
   AgentVisibility,
   RuntimeDevice,
   MemberWithUser,
@@ -36,7 +34,6 @@ import {
   AGENT_DESCRIPTION_MAX_LENGTH,
   VISIBILITY_DESCRIPTION,
   VISIBILITY_LABEL,
-  isSkillsLocalSupportedProvider,
 } from "@multica/core/agents";
 import { CharCounter } from "./char-counter";
 import { useT } from "../../i18n";
@@ -95,13 +92,6 @@ export function CreateAgentDialog({
   const [selectedSkillIds, setSelectedSkillIds] = useState<Set<string>>(
     () => new Set(template?.skills.map((s) => s.id) ?? []),
   );
-  // Default to "merge" for new agents (matches the server-side default —
-  // inherit-from-machine behavior preserved). Duplicate mode carries the
-  // source agent's explicit "ignore" through so a hardened agent stays
-  // hardened.
-  const [skillsLocal, setSkillsLocal] = useState<AgentSkillsLocal>(
-    () => (template?.skills_local === "ignore" ? "ignore" : "merge"),
-  );
   const [creating, setCreating] = useState(false);
 
   // Duplicate-mode pre-fill: clone lands on the source agent's runtime so
@@ -127,13 +117,6 @@ export function CreateAgentDialog({
   const selectedRuntimeLocked =
     selectedRuntime != null &&
     !isRuntimeUsableForUser(selectedRuntime, currentUserId);
-  // The skills_local switch only has runtime support on claude / codex
-  // today — everywhere else the field would be stored but ignored at
-  // exec time, so the toggle is hidden to avoid implying behavior the
-  // backend won't deliver. See MUL-2603.
-  const skillsLocalApplies = isSkillsLocalSupportedProvider(
-    selectedRuntime?.provider,
-  );
 
   // Shared squad-join follow-up. Returns nothing — the caller has
   // already shown its create-success toast; we only need to surface a
@@ -179,15 +162,6 @@ export function CreateAgentDialog({
         model: model.trim() || undefined,
         instructions: trimmedInstructions || undefined,
         avatar_url: avatarUrl ?? undefined,
-        // Only send the toggle when the user opted into isolation AND the
-        // selected runtime actually honours it (claude / codex today).
-        // "merge" is the server-side default; omitting the field keeps the
-        // request body small and prevents older backends without the
-        // column from rejecting the request. Provider gating mirrors the
-        // toggle visibility — we never persist a value the runtime would
-        // ignore at exec time.
-        skills_local:
-          skillsLocalApplies && skillsLocal === "ignore" ? "ignore" : undefined,
       };
       if (template) {
         // Duplicate path: forward the hidden config fields the source
@@ -385,14 +359,6 @@ export function CreateAgentDialog({
               selectedIds={selectedSkillIds}
               onChange={setSelectedSkillIds}
             />
-
-            {skillsLocalApplies && (
-              <SkillsLocalToggle
-                value={skillsLocal}
-                onChange={setSkillsLocal}
-                hintScope="create"
-              />
-            )}
           </div>
         </div>
 
