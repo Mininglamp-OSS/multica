@@ -187,28 +187,24 @@ function resetFixtures() {
 describe("LarkAgentBindButton (CTA gate)", () => {
   beforeEach(resetFixtures);
 
-  it("renders both Feishu and Lark bind CTAs when the viewer is a workspace owner and install is supported", () => {
-    // The CTA was split into two explicit entry points — one per cloud
-    // — so the begin POST hits the right accounts host up front (no
-    // tenant-brand mid-poll auto-switch from a Feishu-first start) and
-    // the QR / dialog copy reflects the cloud the user picked. Both
-    // buttons must mount side by side for owners/admins; either one
-    // alone would re-introduce the "Lark user has to scan a Feishu QR"
-    // confusion this split is meant to remove (MUL-3083 follow-up).
+  it("shows the Feishu bind CTA but hides the Lark CTA for an owner (MUL-3083)", () => {
+    // Mainland Feishu binding stays available; the Lark (international)
+    // entry is temporarily hidden via LARK_INTL_CONNECT_ENABLED while its
+    // install→inbound pipeline is stabilized (MUL-3083).
     render(<LarkAgentBindButton agentId="agent-1" agentName="Bot" />, {
       wrapper: I18nWrapper,
     });
     expect(screen.getByRole("button", { name: /Bind to Feishu/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Bind to Lark/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Bind to Lark/i })).toBeNull();
   });
 
-  it("renders both bind CTAs when the viewer is a workspace admin", () => {
+  it("shows the Feishu bind CTA but hides the Lark CTA for an admin (MUL-3083)", () => {
     membersRef.current = [{ user_id: "user-1", role: "admin" }];
     render(<LarkAgentBindButton agentId="agent-1" agentName="Bot" />, {
       wrapper: I18nWrapper,
     });
     expect(screen.getByRole("button", { name: /Bind to Feishu/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Bind to Lark/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Bind to Lark/i })).toBeNull();
   });
 
   it("hides both bind CTAs for a non-admin agent owner (matches backend admin gate)", () => {
@@ -258,28 +254,12 @@ describe("LarkAgentBindButton (CTA gate)", () => {
     );
   });
 
-  it("clicking Bind to Lark begins an install with region='lark'", async () => {
-    const user = userEvent.setup();
-    mockBeginInstall.mockResolvedValue({
-      session_id: "sess-lark",
-      qr_code_url: "https://accounts.larksuite.com/oauth/v1/device?u=lark",
-      expires_in_seconds: 300,
-      poll_interval_seconds: 2,
-    });
-    mockGetStatus.mockResolvedValue({ status: "pending" });
-    render(<LarkAgentBindButton agentId="agent-1" agentName="Bot" />, {
-      wrapper: I18nWrapper,
-    });
-    await user.click(screen.getByRole("button", { name: /Bind to Lark/i }));
-    await waitFor(() => {
-      expect(mockBeginInstall).toHaveBeenCalledTimes(1);
-    });
-    expect(mockBeginInstall).toHaveBeenCalledWith(
-      "workspace-1",
-      "agent-1",
-      "lark",
-    );
-  });
+  // NOTE (MUL-3083): the "clicking Bind to Lark begins an install with
+  // region='lark'" test was removed alongside the temporarily-hidden Lark
+  // (international) CTA — there is no Lark button to click while
+  // LARK_INTL_CONNECT_ENABLED is false. The Feishu region routing is still
+  // pinned by the "clicking Bind to Feishu …" test above; restore the Lark
+  // case when the entry is re-enabled.
 
   it("swaps the bind CTAs for a 'Connected + Manage in Lark' badge when this agent already has an active installation", () => {
     // Anti-zombie guard: re-scanning the same agent upserts the row
@@ -352,7 +332,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
     expect(link.href).toBe("https://open.larksuite.com/app/cli_lark_app");
   });
 
-  it("still shows both bind CTAs when an installation exists for a DIFFERENT agent (per-agent scoping)", () => {
+  it("shows the Feishu CTA (Lark hidden) for an agent without its own installation, per-agent scoping (MUL-3083)", () => {
     installationsRef.current.installations = [
       {
         id: "inst-other",
@@ -371,7 +351,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
       wrapper: I18nWrapper,
     });
     expect(screen.getByRole("button", { name: /Bind to Feishu/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Bind to Lark/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Bind to Lark/i })).toBeNull();
   });
 
   it("keeps the Connected + Manage badge for an already-installed agent even when new installs are unavailable (install_supported=false)", () => {
@@ -413,7 +393,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
     ).toBeTruthy();
   });
 
-  it("still shows both bind CTAs when this agent's only installation is revoked (treat as not-installed for re-bind)", () => {
+  it("shows the Feishu CTA (Lark hidden) when this agent's only installation is revoked (MUL-3083)", () => {
     installationsRef.current.installations = [
       {
         id: "inst-revoked",
@@ -432,7 +412,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
       wrapper: I18nWrapper,
     });
     expect(screen.getByRole("button", { name: /Bind to Feishu/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Bind to Lark/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Bind to Lark/i })).toBeNull();
   });
 });
 
@@ -599,7 +579,9 @@ describe("LarkInstallDialog (polling terminal errors)", () => {
     render(<LarkAgentBindButton agentId="agent-1" agentName="Bot" />, {
       wrapper: I18nWrapper,
     });
-    await user.click(screen.getByRole("button", { name: /Bind to Lark/i }));
+    // The Lark CTA is hidden (MUL-3083); open the dialog via the Feishu CTA
+    // — the polling-error behavior under test is region-agnostic.
+    await user.click(screen.getByRole("button", { name: /Bind to Feishu/i }));
     // Let the begin-session promise resolve and the QR render.
     await waitFor(() => {
       expect(screen.getByTestId("qr-code")).toBeTruthy();
@@ -673,7 +655,9 @@ describe("LarkInstallDialog (polling terminal errors)", () => {
     render(<LarkAgentBindButton agentId="agent-1" agentName="Bot" />, {
       wrapper: StrictModeWrapper,
     });
-    await user.click(screen.getByRole("button", { name: /Bind to Lark/i }));
+    // The Lark CTA is hidden (MUL-3083); the StrictMode regression is about
+    // the dialog mount cycle, so open it via the Feishu CTA.
+    await user.click(screen.getByRole("button", { name: /Bind to Feishu/i }));
 
     // The QR must appear even though the dialog mounted, unmounted, and
     // mounted again under StrictMode. The previous bug left the body

@@ -43,6 +43,15 @@ import type { LarkInstallation, LarkInstallStatusResponse } from "@multica/core/
 import { ActorAvatar } from "../../common/actor-avatar";
 import { useT } from "../../i18n";
 
+// MUL-3083: the Lark (international, open.larksuite.com) "connect a Bot"
+// entry is temporarily hidden while its install → inbound pipeline is
+// stabilized — some Lark installs complete on Lark's side but never land a
+// `lark_installation` row, so the Bot silently can't receive messages.
+// Mainland Feishu is unaffected and keeps its bind entry. Existing
+// installations (either cloud) stay fully manageable. Flip this back to
+// `true` to restore the "Bind to Lark" CTA; nothing else needs to change.
+const LARK_INTL_CONNECT_ENABLED: boolean = false;
+
 // LarkTab is the workspace settings panel for Lark Bot installations.
 // Listing is member-visible; the disconnect action is admin-only (the
 // backend enforces it; the UI hides the button for non-admins to match).
@@ -389,21 +398,26 @@ export function LarkAgentBindButton({
           <ExternalLink className="h-3 w-3" />
           {t(($) => $.lark.bind_button_feishu)}
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setDialogRegion("lark")}
-          disabled={!agentId}
-          title={
-            agentName
-              ? t(($) => $.lark.bind_button_lark_title, { agent: agentName })
-              : undefined
-          }
-          data-testid="lark-agent-bind-lark"
-        >
-          <ExternalLink className="h-3 w-3" />
-          {t(($) => $.lark.bind_button_lark)}
-        </Button>
+        {/* MUL-3083: Lark (international) bind entry is temporarily hidden —
+            see LARK_INTL_CONNECT_ENABLED. Mainland Feishu (above) is
+            unaffected. */}
+        {LARK_INTL_CONNECT_ENABLED && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setDialogRegion("lark")}
+            disabled={!agentId}
+            title={
+              agentName
+                ? t(($) => $.lark.bind_button_lark_title, { agent: agentName })
+                : undefined
+            }
+            data-testid="lark-agent-bind-lark"
+          >
+            <ExternalLink className="h-3 w-3" />
+            {t(($) => $.lark.bind_button_lark)}
+          </Button>
+        )}
       </div>
       {dialogRegion && (
         <LarkInstallDialog
