@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -213,7 +214,12 @@ func (c *HTTPClient) GetGroupMembers(ctx context.Context, groupNo string) ([]Gro
 	var out struct {
 		Members []GroupMember `json:"members"`
 	}
-	if err := c.doJSON(ctx, http.MethodGet, "/v1/bot/groups/"+groupNo+"/members", nil, &out); err != nil {
+	// groupNo originates from inbound message data (an untrusted boundary), so it
+	// is escaped before being interpolated into the path — an unescaped value
+	// containing "?", "/", or ".." would otherwise rewrite the request (query
+	// injection / path traversal toward other bot endpoints).
+	path := "/v1/bot/groups/" + url.PathEscape(groupNo) + "/members"
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return out.Members, nil
