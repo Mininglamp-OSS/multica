@@ -22,26 +22,39 @@ import (
 
 var testPool *pgxpool.Pool
 
+// TestMain wires a DB pool when one is reachable. When it is not, the pool is
+// left nil and DB-backed tests skip via requireDB; mock-only tests (the
+// dispatcher suite) still run, so they are not silently disabled without a
+// database.
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://multica:multica@localhost:5432/multica?sslmode=disable"
 	}
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		fmt.Printf("Skipping octo DB tests: cannot connect: %v\n", err)
-		os.Exit(0)
+	if pool, err := pgxpool.New(ctx, dbURL); err == nil {
+		if perr := pool.Ping(ctx); perr == nil {
+			testPool = pool
+		} else {
+			fmt.Printf("octo DB tests will skip: database not reachable: %v\n", perr)
+			pool.Close()
+		}
+	} else {
+		fmt.Printf("octo DB tests will skip: cannot connect: %v\n", err)
 	}
-	if err := pool.Ping(ctx); err != nil {
-		fmt.Printf("Skipping octo DB tests: database not reachable: %v\n", err)
-		pool.Close()
-		os.Exit(0)
-	}
-	testPool = pool
 	code := m.Run()
-	pool.Close()
+	if testPool != nil {
+		testPool.Close()
+	}
 	os.Exit(code)
+}
+
+// requireDB skips a test when no database is configured.
+func requireDB(t *testing.T) {
+	t.Helper()
+	if testPool == nil {
+		t.Skip("no database available (set DATABASE_URL)")
+	}
 }
 
 func randToken() string {
@@ -127,6 +140,7 @@ func newInstallation(t *testing.T, q *db.Queries, wsID, userID, agentID pgtype.U
 }
 
 func TestOctoInstallation_CRUD(t *testing.T) {
+	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t, q)
 
@@ -183,6 +197,7 @@ func containsInstallation(list []db.OctoInstallation, id pgtype.UUID) bool {
 }
 
 func TestOctoInstallation_UpsertOnConflict(t *testing.T) {
+	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t, q)
 
@@ -212,6 +227,7 @@ func TestOctoInstallation_UpsertOnConflict(t *testing.T) {
 }
 
 func TestOctoInboundDedup_TwoPhaseClaim(t *testing.T) {
+	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t, q)
 	inst := newInstallation(t, q, wsID, userID, agentID)
@@ -266,6 +282,7 @@ func TestOctoInboundDedup_TwoPhaseClaim(t *testing.T) {
 }
 
 func TestOctoInboundDedup_ReleaseAllowsReclaim(t *testing.T) {
+	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t, q)
 	inst := newInstallation(t, q, wsID, userID, agentID)
@@ -299,6 +316,7 @@ func TestOctoInboundDedup_ReleaseAllowsReclaim(t *testing.T) {
 }
 
 func TestOctoBindingToken_ConsumeOnce(t *testing.T) {
+	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t, q)
 	inst := newInstallation(t, q, wsID, userID, agentID)
@@ -327,6 +345,7 @@ func TestOctoBindingToken_ConsumeOnce(t *testing.T) {
 }
 
 func TestOctoBindingToken_TTLCapRejected(t *testing.T) {
+	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t, q)
 	inst := newInstallation(t, q, wsID, userID, agentID)
@@ -346,6 +365,7 @@ func TestOctoBindingToken_TTLCapRejected(t *testing.T) {
 }
 
 func TestOctoChatSessionBinding_BothDirections(t *testing.T) {
+	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t, q)
 	inst := newInstallation(t, q, wsID, userID, agentID)
