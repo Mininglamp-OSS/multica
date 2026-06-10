@@ -63,25 +63,30 @@ type EnsureChatSessionParams struct {
 	Creator pgtype.UUID
 }
 
-// EnsureChatSession returns the chat_session.id bound to the given Octo channel,
+// EnsureChatSession returns the chat_session bound to the given Octo channel,
 // creating the session + binding on first contact. The race between two
 // concurrent first messages is resolved by the UNIQUE (installation_id,
 // octo_channel_id) constraint: the loser re-reads the winner's row.
-func (s *ChatSessionService) EnsureChatSession(ctx context.Context, p EnsureChatSessionParams) (pgtype.UUID, error) {
+//
+// The full chat_session row is returned (not just the id) so the caller can
+// enqueue an agent run without a second GetChatSession round-trip: the create
+// path hands back the row CreateChatSession already produced, and the
+// existing-session / race-loser paths reload it once via GetChatSession.
+func (s *ChatSessionService) EnsureChatSession(ctx context.Context, p EnsureChatSessionParams) (db.ChatSession, error) {
 	existing, err := s.queries.GetOctoChatSessionBinding(ctx, db.GetOctoChatSessionBindingParams{
 		InstallationID: p.InstallationID,
 		OctoChannelID:  string(p.ChannelID),
 	})
 	if err == nil {
-		return existing.ChatSessionID, nil
+		return s.queries.GetChatSession(ctx, existing.ChatSessionID)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return pgtype.UUID{}, fmt.Errorf("lookup chat session binding: %w", err)
+		return db.ChatSession{}, fmt.Errorf("lookup chat session binding: %w", err)
 	}
 
-	id, err := s.createSessionAndBinding(ctx, p)
+	session, err := s.createSessionAndBinding(ctx, p)
 	if err == nil {
-		return id, nil
+		return session, nil
 	}
 	if isUniqueViolation(err) {
 		existing, lookupErr := s.queries.GetOctoChatSessionBinding(ctx, db.GetOctoChatSessionBindingParams{
@@ -89,17 +94,17 @@ func (s *ChatSessionService) EnsureChatSession(ctx context.Context, p EnsureChat
 			OctoChannelID:  string(p.ChannelID),
 		})
 		if lookupErr == nil {
-			return existing.ChatSessionID, nil
+			return s.queries.GetChatSession(ctx, existing.ChatSessionID)
 		}
-		return pgtype.UUID{}, fmt.Errorf("race re-read after unique violation: %w", lookupErr)
+		return db.ChatSession{}, fmt.Errorf("race re-read after unique violation: %w", lookupErr)
 	}
-	return pgtype.UUID{}, err
+	return db.ChatSession{}, err
 }
 
-func (s *ChatSessionService) createSessionAndBinding(ctx context.Context, p EnsureChatSessionParams) (pgtype.UUID, error) {
+func (s *ChatSessionService) createSessionAndBinding(ctx context.Context, p EnsureChatSessionParams) (db.ChatSession, error) {
 	tx, err := s.txStarter.Begin(ctx)
 	if err != nil {
-		return pgtype.UUID{}, fmt.Errorf("begin tx: %w", err)
+		return db.ChatSession{}, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	qtx := s.queries.WithTx(tx)
@@ -111,7 +116,7 @@ func (s *ChatSessionService) createSessionAndBinding(ctx context.Context, p Ensu
 		Title:       defaultSessionTitle(p.ChannelType),
 	})
 	if err != nil {
-		return pgtype.UUID{}, fmt.Errorf("create chat session: %w", err)
+		return db.ChatSession{}, fmt.Errorf("create chat session: %w", err)
 	}
 	if _, err := qtx.CreateOctoChatSessionBinding(ctx, db.CreateOctoChatSessionBindingParams{
 		ChatSessionID:   session.ID,
@@ -119,12 +124,12 @@ func (s *ChatSessionService) createSessionAndBinding(ctx context.Context, p Ensu
 		OctoChannelID:   string(p.ChannelID),
 		OctoChannelType: int16(p.ChannelType),
 	}); err != nil {
-		return pgtype.UUID{}, err
+		return db.ChatSession{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return pgtype.UUID{}, fmt.Errorf("commit: %w", err)
+		return db.ChatSession{}, fmt.Errorf("commit: %w", err)
 	}
-	return session.ID, nil
+	return session, nil
 }
 
 // AppendUserMessageParams carries the message to store plus the dedup claim to

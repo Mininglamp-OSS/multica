@@ -22,13 +22,12 @@ type DispatcherQueries interface {
 	MarkOctoInboundDedupProcessed(ctx context.Context, arg db.MarkOctoInboundDedupProcessedParams) (int64, error)
 	ReleaseOctoInboundDedup(ctx context.Context, arg db.ReleaseOctoInboundDedupParams) (int64, error)
 	GetOctoUserBindingByUID(ctx context.Context, arg db.GetOctoUserBindingByUIDParams) (db.OctoUserBinding, error)
-	GetChatSession(ctx context.Context, id pgtype.UUID) (db.ChatSession, error)
 }
 
 // ChatService find-or-creates sessions and appends user messages. Satisfied by
 // *ChatSessionService.
 type ChatService interface {
-	EnsureChatSession(ctx context.Context, p EnsureChatSessionParams) (pgtype.UUID, error)
+	EnsureChatSession(ctx context.Context, p EnsureChatSessionParams) (db.ChatSession, error)
 	AppendUserMessage(ctx context.Context, p AppendUserMessageParams) (AppendResult, error)
 }
 
@@ -161,7 +160,7 @@ func (d *Dispatcher) processClaimed(ctx context.Context, msg InboundMessage, ins
 	if msg.ChannelType == ChannelGroup {
 		creator = inst.InstallerUserID
 	}
-	sessionID, err := d.Chat.EnsureChatSession(ctx, EnsureChatSessionParams{
+	session, err := d.Chat.EnsureChatSession(ctx, EnsureChatSessionParams{
 		WorkspaceID:    inst.WorkspaceID,
 		InstallationID: inst.ID,
 		AgentID:        inst.AgentID,
@@ -178,7 +177,7 @@ func (d *Dispatcher) processClaimed(ctx context.Context, msg InboundMessage, ins
 	//    any later failure must return finalizeNone (re-Mark is a no-op, and we
 	//    must not Release a row that is already terminal).
 	appendRes, err := d.Chat.AppendUserMessage(ctx, AppendUserMessageParams{
-		ChatSessionID:  sessionID,
+		ChatSessionID:  session.ID,
 		Body:           msg.Body,
 		InstallationID: inst.ID,
 		MessageID:      msg.MessageID,
@@ -201,22 +200,15 @@ func (d *Dispatcher) processClaimed(ctx context.Context, msg InboundMessage, ins
 	res := DispatchResult{
 		Outcome:        OutcomeIngested,
 		InstallationID: inst.ID,
-		ChatSessionID:  sessionID,
+		ChatSessionID:  session.ID,
 		SenderUID:      msg.SenderUID,
 	}
 
 	// 7. Enqueue the agent run. The chat_message is already durable, so all
-	//    paths here return postAppendFinalize (never Release). A daemon that is
-	//    merely disconnected is not an error — as long as the agent has a
-	//    runtime, the task waits to be claimed.
-	session, err := d.Queries.GetChatSession(ctx, sessionID)
-	if err != nil {
-		// The message is stored; we just couldn't reload the session to enqueue.
-		// Surface as ingested-without-task; the next message re-triggers a run.
-		d.logger().Error("octo dispatcher: reload chat session failed",
-			"chat_session_id", uuidString(sessionID), "err", err.Error())
-		return res, postAppendFinalize, nil
-	}
+	//    paths here return postAppendFinalize (never Release). EnsureChatSession
+	//    already handed back the full session row, so there is no reload here. A
+	//    daemon that is merely disconnected is not an error — as long as the
+	//    agent has a runtime, the task waits to be claimed.
 	task, err := d.TaskService.EnqueueChatTask(ctx, session, binding.MulticaUserID)
 	if err != nil {
 		switch {
@@ -228,7 +220,7 @@ func (d *Dispatcher) processClaimed(ctx context.Context, msg InboundMessage, ins
 			// Infra failure. The message is durable; log and let the next
 			// message re-trigger a run.
 			d.logger().Error("octo dispatcher: enqueue chat task failed",
-				"chat_session_id", uuidString(sessionID), "err", err.Error())
+				"chat_session_id", uuidString(session.ID), "err", err.Error())
 		}
 		return res, postAppendFinalize, nil
 	}

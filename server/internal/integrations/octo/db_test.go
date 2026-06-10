@@ -4,14 +4,17 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/multica-ai/multica/server/internal/integrations/octo"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -412,4 +415,197 @@ func randUUID() pgtype.UUID {
 	_, _ = rand.Read(u.Bytes[:])
 	u.Valid = true
 	return u
+}
+
+// --- ChatSessionService (chat_service.go) DB-backed tests --------------------
+
+// TestEnsureChatSession_ConcurrentFirstMessage exercises the race-critical
+// UNIQUE (installation_id, octo_channel_id) re-read path: two concurrent first
+// messages on the same channel must resolve to the SAME chat_session — the
+// insert loser catches the 23505 and re-reads the winner's row.
+func TestEnsureChatSession_ConcurrentFirstMessage(t *testing.T) {
+	requireDB(t)
+	q := db.New(testPool)
+	wsID, userID, agentID := fixture(t, q)
+	inst := newInstallation(t, q, wsID, userID, agentID)
+	ctx := context.Background()
+
+	svc := octo.NewChatSessionService(q, testPool)
+	channelID := octo.ChannelID("ch_" + randToken())
+
+	params := octo.EnsureChatSessionParams{
+		WorkspaceID:    wsID,
+		InstallationID: inst.ID,
+		AgentID:        agentID,
+		ChannelID:      channelID,
+		ChannelType:    octo.ChannelDM,
+		Creator:        userID,
+	}
+
+	const n = 8
+	results := make([]pgtype.UUID, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // line all goroutines up so the inserts actually race
+			s, err := svc.EnsureChatSession(ctx, params)
+			results[i], errs[i] = s.ID, err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var winner pgtype.UUID
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("EnsureChatSession[%d] error: %v", i, errs[i])
+		}
+		if !results[i].Valid {
+			t.Fatalf("EnsureChatSession[%d] returned zero session id", i)
+		}
+		if !winner.Valid {
+			winner = results[i]
+			continue
+		}
+		if results[i] != winner {
+			t.Fatalf("concurrent EnsureChatSession returned different sessions: %v vs %v", results[i], winner)
+		}
+	}
+
+	// Exactly one binding row exists for the channel, pointing at the winner.
+	bind, err := q.GetOctoChatSessionBinding(ctx, db.GetOctoChatSessionBindingParams{
+		InstallationID: inst.ID, OctoChannelID: string(channelID),
+	})
+	if err != nil {
+		t.Fatalf("binding lookup: %v", err)
+	}
+	if bind.ChatSessionID != winner {
+		t.Errorf("binding points at %v, want winner %v", bind.ChatSessionID, winner)
+	}
+
+	// A subsequent call returns the same row without creating a second session.
+	again, err := svc.EnsureChatSession(ctx, params)
+	if err != nil {
+		t.Fatalf("re-ensure: %v", err)
+	}
+	if again.ID != winner {
+		t.Errorf("re-ensure returned %v, want %v", again.ID, winner)
+	}
+}
+
+// TestAppendUserMessage_StaleClaimLost verifies the in-tx dedup Mark race: a
+// stale/mismatched ClaimToken yields ErrClaimLost and leaves NO chat_message
+// (the deferred rollback unwinds the insert).
+func TestAppendUserMessage_StaleClaimLost(t *testing.T) {
+	requireDB(t)
+	q := db.New(testPool)
+	wsID, userID, agentID := fixture(t, q)
+	inst := newInstallation(t, q, wsID, userID, agentID)
+	ctx := context.Background()
+
+	svc := octo.NewChatSessionService(q, testPool)
+	session, err := svc.EnsureChatSession(ctx, octo.EnsureChatSessionParams{
+		WorkspaceID:    wsID,
+		InstallationID: inst.ID,
+		AgentID:        agentID,
+		ChannelID:      octo.ChannelID("ch_" + randToken()),
+		ChannelType:    octo.ChannelDM,
+		Creator:        userID,
+	})
+	if err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+
+	// Claim the dedup row so a real (but rotated) token exists, then pass a
+	// DIFFERENT token to AppendUserMessage to simulate a stale reclaim.
+	msgID := "msg_" + randToken()
+	if _, err := q.ClaimOctoInboundDedup(ctx, db.ClaimOctoInboundDedupParams{
+		InstallationID: inst.ID, MessageID: msgID,
+	}); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	_, err = svc.AppendUserMessage(ctx, octo.AppendUserMessageParams{
+		ChatSessionID:  session.ID,
+		Body:           "hello",
+		InstallationID: inst.ID,
+		MessageID:      msgID,
+		ClaimToken:     randUUID(), // mismatched → Mark matches 0 rows
+	})
+	if !errors.Is(err, octo.ErrClaimLost) {
+		t.Fatalf("got err %v, want ErrClaimLost", err)
+	}
+
+	// No chat_message should have landed — the transaction rolled back.
+	msgs, err := q.ListChatMessages(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("ClaimLost left %d chat_message rows, want 0", len(msgs))
+	}
+}
+
+// TestAppendUserMessage_ValidClaimCommits verifies the happy path: a valid
+// claim token marks the dedup row in-tx (DedupMarked) and the message lands.
+func TestAppendUserMessage_ValidClaimCommits(t *testing.T) {
+	requireDB(t)
+	q := db.New(testPool)
+	wsID, userID, agentID := fixture(t, q)
+	inst := newInstallation(t, q, wsID, userID, agentID)
+	ctx := context.Background()
+
+	svc := octo.NewChatSessionService(q, testPool)
+	session, err := svc.EnsureChatSession(ctx, octo.EnsureChatSessionParams{
+		WorkspaceID:    wsID,
+		InstallationID: inst.ID,
+		AgentID:        agentID,
+		ChannelID:      octo.ChannelID("ch_" + randToken()),
+		ChannelType:    octo.ChannelDM,
+		Creator:        userID,
+	})
+	if err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+
+	msgID := "msg_" + randToken()
+	claim, err := q.ClaimOctoInboundDedup(ctx, db.ClaimOctoInboundDedupParams{
+		InstallationID: inst.ID, MessageID: msgID,
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	res, err := svc.AppendUserMessage(ctx, octo.AppendUserMessageParams{
+		ChatSessionID:  session.ID,
+		Body:           "hello",
+		InstallationID: inst.ID,
+		MessageID:      msgID,
+		ClaimToken:     claim.ClaimToken,
+	})
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if !res.DedupMarked {
+		t.Errorf("DedupMarked = false, want true (in-tx Mark should have run)")
+	}
+
+	msgs, err := q.ListChatMessages(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "hello" {
+		t.Errorf("got %d messages (%+v), want 1 with body 'hello'", len(msgs), msgs)
+	}
+
+	// The dedup row is now terminal — a replay claim returns no rows.
+	if _, err := q.ClaimOctoInboundDedup(ctx, db.ClaimOctoInboundDedupParams{
+		InstallationID: inst.ID, MessageID: msgID,
+	}); err == nil {
+		t.Errorf("replay claim after commit should return no rows")
+	}
 }
