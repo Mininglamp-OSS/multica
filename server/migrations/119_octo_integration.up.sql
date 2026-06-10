@@ -99,8 +99,10 @@ CREATE TABLE octo_user_binding (
 
 CREATE INDEX idx_octo_user_binding_user
     ON octo_user_binding(multica_user_id, workspace_id);
-CREATE INDEX idx_octo_user_binding_installation_uid
-    ON octo_user_binding(installation_id, octo_uid);
+-- No explicit index on (installation_id, octo_uid): the UNIQUE constraint above
+-- already creates one, and that is exactly the key GetOctoUserBindingByUID reads.
+-- (Unlike Lark, whose second index is on the DIFFERENT key (workspace_id,
+-- lark_open_id); Octo has no workspace-scoped uid lookup, so nothing to add.)
 
 -- =====================
 -- octo_chat_session_binding
@@ -120,8 +122,9 @@ CREATE TABLE octo_chat_session_binding (
     UNIQUE (chat_session_id)
 );
 
-CREATE INDEX idx_octo_chat_session_binding_session
-    ON octo_chat_session_binding(chat_session_id);
+-- No explicit index on (chat_session_id): the UNIQUE constraint above already
+-- creates one, which fully serves the reverse lookup
+-- GetOctoChatSessionBindingBySession.
 
 -- =====================
 -- octo_inbound_dedup
