@@ -245,7 +245,13 @@
     "agent_id": "Agent ID",
     "bot_token": "机器人 token",
     "api_url": "API 地址（可选）",
-    "saving": "保存中…"
+    "saving": "保存中…",
+    "bind_button": "连接 Octo bot",
+    "bind_button_title": "为 {{agent}} 连接一个 Octo bot",
+    "agent_connected_label": "已连接到 Octo",
+    "agent_bind_intro": "为该智能体连接一个 Octo bot，用户即可在 Octo 与其对话并创建 issue。",
+    "members_note": "只有工作区所有者和管理员可以连接或管理 Octo bot。请联系管理员配置。",
+    "not_enabled_note": "该部署未启用 Octo 集成。"
   },
   "lark": {
     "section_title": "飞书",

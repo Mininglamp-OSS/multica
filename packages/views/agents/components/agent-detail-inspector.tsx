@@ -47,6 +47,7 @@ import { SkillAttach } from "./inspector/skill-attach";
 import { ThinkingPropRow } from "./inspector/thinking-prop-row";
 import { VisibilityPicker } from "./inspector/visibility-picker";
 import { LarkAgentBindButton } from "../../settings/components/lark-tab";
+import { OctoAgentBindButton } from "../../settings/components/octo-tab";
 
 interface InspectorProps {
   agent: Agent;
@@ -231,6 +232,11 @@ export function AgentDetailInspector({
           </div>
           <div className="flex flex-wrap gap-2">
             <LarkAgentBindButton
+              agentId={agent.id}
+              agentName={agent.name}
+              onShowConnectedDetails={onShowIntegrations}
+            />
+            <OctoAgentBindButton
               agentId={agent.id}
               agentName={agent.name}
               onShowConnectedDetails={onShowIntegrations}

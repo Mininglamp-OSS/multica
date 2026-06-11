@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Trash2 } from "lucide-react";
+import { Trash2, MessageSquare, ChevronRight } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardContent } from "@multica/ui/components/ui/card";
 import { Input } from "@multica/ui/components/ui/input";
@@ -27,6 +27,7 @@ import {
 } from "@multica/ui/components/ui/dialog";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { cn } from "@multica/ui/lib/utils";
 import { memberListOptions } from "@multica/core/workspace/queries";
 import { octoInstallationsOptions, octoKeys } from "@multica/core/octo";
 import { api, ApiError } from "@multica/core/api";
@@ -166,22 +167,178 @@ export function OctoTab() {
   );
 }
 
+// OctoAgentBindButton is the per-agent entry point we surface from the agent
+// detail page (inspector + Integrations tab). The Settings OctoTab is the
+// management view; this button is the shortcut for "connect a bot to THIS
+// agent". Visibility mirrors OctoTab's gates:
+//   1. Only workspace owners/admins (the backend gates create/delete on role).
+//   2. Only when the deployment has Octo enabled (configured).
+//   3. If this agent already has an active installation, show a connected
+//      status row; otherwise show the Connect CTA, which opens the shared
+//      ConfigureDialog pre-filled and locked to this agent id.
+export function OctoAgentBindButton({
+  agentId,
+  agentName,
+  className,
+  onShowConnectedDetails,
+}: {
+  agentId: string;
+  agentName?: string;
+  className?: string;
+  /**
+   * When set, the connected state renders as a compact status row that invokes
+   * this callback (the inspector passes a "jump to the Integrations tab"
+   * handler) instead of a plain label. Mirrors LarkAgentBindButton.
+   */
+  onShowConnectedDetails?: () => void;
+}) {
+  const { t } = useT("settings");
+  const wsId = useWorkspaceId();
+  const qc = useQueryClient();
+  const user = useAuthStore((s) => s.user);
+  const [configureOpen, setConfigureOpen] = useState(false);
+
+  const { data: listing } = useQuery({
+    ...octoInstallationsOptions(wsId),
+    enabled: !!wsId,
+  });
+  const { data: members = [] } = useQuery({
+    ...memberListOptions(wsId),
+    enabled: !!wsId,
+  });
+
+  const canManage = members.some(
+    (m) => m.user_id === user?.id && (m.role === "owner" || m.role === "admin"),
+  );
+  if (!canManage) return null;
+  if (listing?.configured !== true) return null;
+
+  const existing = listing.installations.find(
+    (inst) => inst.agent_id === agentId && inst.status === "active",
+  );
+  if (existing) {
+    return (
+      <OctoAgentConnectedRow
+        installation={existing}
+        onClick={onShowConnectedDetails}
+        className={className}
+      />
+    );
+  }
+
+  return (
+    <>
+      <Button
+        variant="outline"
+        size="sm"
+        className={className}
+        onClick={() => setConfigureOpen(true)}
+        disabled={!agentId}
+        title={
+          agentName ? t(($) => $.octo.bind_button_title, { agent: agentName }) : undefined
+        }
+        data-testid="octo-agent-bind"
+      >
+        <MessageSquare className="h-3 w-3" />
+        {t(($) => $.octo.bind_button)}
+      </Button>
+      <ConfigureDialog
+        open={configureOpen}
+        onOpenChange={setConfigureOpen}
+        wsId={wsId}
+        defaultAgentId={agentId}
+        onConfigured={() => {
+          setConfigureOpen(false);
+          if (wsId) qc.invalidateQueries({ queryKey: octoKeys.installations(wsId) });
+        }}
+      />
+    </>
+  );
+}
+
+// OctoAgentConnectedRow is the compact "already connected" affordance shown in
+// place of the Connect button when this agent has an active Octo installation.
+// When onClick is provided (the inspector) it's a button that deep-links into
+// the Integrations tab; otherwise it's a static status label.
+function OctoAgentConnectedRow({
+  installation,
+  onClick,
+  className,
+}: {
+  installation: OctoInstallation;
+  onClick?: () => void;
+  className?: string;
+}) {
+  const { t } = useT("settings");
+  const label = installation.bot_name || installation.robot_id;
+  const content = (
+    <>
+      <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
+      <span className="truncate">
+        {t(($) => $.octo.agent_connected_label)}
+        {label ? ` · ${label}` : ""}
+      </span>
+      {onClick && <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0" />}
+    </>
+  );
+  if (!onClick) {
+    return (
+      <div
+        className={cn(
+          "flex items-center gap-2 text-xs text-muted-foreground",
+          className,
+        )}
+        data-testid="octo-agent-connected"
+      >
+        {content}
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+        className,
+      )}
+      data-testid="octo-agent-connected"
+    >
+      {content}
+    </button>
+  );
+}
+
 function ConfigureDialog({
   open,
   onOpenChange,
   wsId,
   onConfigured,
+  defaultAgentId,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   wsId: string;
   onConfigured: () => void;
+  /**
+   * When set, the agent-id field is pre-filled and locked — used by the
+   * per-agent bind entry point so an admin can't accidentally bind the bot to
+   * a different agent than the one they opened the dialog from. Omitted by the
+   * Settings panel, which lets the admin type any agent id.
+   */
+  defaultAgentId?: string;
 }) {
   const { t } = useT("settings");
-  const [agentId, setAgentId] = useState("");
+  const [agentId, setAgentId] = useState(defaultAgentId ?? "");
   const [botToken, setBotToken] = useState("");
   const [apiUrl, setApiUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  // Keep the field in sync when the dialog is reopened for a different agent
+  // (the component stays mounted across opens in the per-agent button).
+  useEffect(() => {
+    if (open) setAgentId(defaultAgentId ?? "");
+  }, [open, defaultAgentId]);
 
   const submit = async () => {
     if (!agentId.trim() || !botToken.trim()) return;
@@ -193,7 +350,7 @@ function ConfigureDialog({
         api_url: apiUrl.trim() || undefined,
       });
       toast.success(t(($) => $.octo.configured));
-      setAgentId("");
+      setAgentId(defaultAgentId ?? "");
       setBotToken("");
       setApiUrl("");
       onConfigured();
@@ -214,7 +371,12 @@ function ConfigureDialog({
         <div className="space-y-3">
           <div className="space-y-1">
             <label className="text-xs font-medium">{t(($) => $.octo.agent_id)}</label>
-            <Input value={agentId} onChange={(e) => setAgentId(e.target.value)} placeholder="agent uuid" />
+            <Input
+              value={agentId}
+              onChange={(e) => setAgentId(e.target.value)}
+              placeholder="agent uuid"
+              disabled={!!defaultAgentId}
+            />
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium">{t(($) => $.octo.bot_token)}</label>

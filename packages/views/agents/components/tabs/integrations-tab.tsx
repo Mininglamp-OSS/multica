@@ -1,13 +1,15 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Webhook } from "lucide-react";
+import { Webhook, MessageSquare } from "lucide-react";
 import type { Agent } from "@multica/core/types";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { larkInstallationsOptions } from "@multica/core/lark";
+import { octoInstallationsOptions } from "@multica/core/octo";
 import { memberListOptions } from "@multica/core/workspace/queries";
 import { LarkAgentBindButton } from "../../../settings/components/lark-tab";
+import { OctoAgentBindButton } from "../../../settings/components/octo-tab";
 import { useT } from "../../../i18n";
 
 /**
@@ -37,6 +39,10 @@ export function IntegrationsTab({ agent }: { agent: Agent }) {
     ...larkInstallationsOptions(wsId),
     enabled: !!wsId,
   });
+  const { data: octoListing } = useQuery({
+    ...octoInstallationsOptions(wsId),
+    enabled: !!wsId,
+  });
   const { data: members = [] } = useQuery({
     ...memberListOptions(wsId),
     enabled: !!wsId,
@@ -51,6 +57,8 @@ export function IntegrationsTab({ agent }: { agent: Agent }) {
     listing?.installations.some(
       (inst) => inst.agent_id === agent.id && inst.status === "active",
     ) ?? false;
+
+  const octoConfigured = octoListing?.configured === true;
 
   return (
     <div className="space-y-6">
@@ -104,6 +112,38 @@ export function IntegrationsTab({ agent }: { agent: Agent }) {
             // bot: the shared button renders the scan-to-bind CTA or the
             // already-connected "Manage in Lark" badge.
             <LarkAgentBindButton agentId={agent.id} agentName={agent.name} />
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-lg border">
+        <div className="flex items-start gap-3 p-4">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground">
+            <MessageSquare className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1 space-y-1">
+            <h3 className="text-sm font-medium">{ts(($) => $.octo.section_title)}</h3>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {ts(($) => $.octo.agent_bind_intro)}
+            </p>
+          </div>
+        </div>
+        <div className="border-t px-4 py-3">
+          {!octoConfigured ? (
+            <p className="text-xs text-muted-foreground">
+              {ts(($) => $.octo.not_enabled_note)}
+            </p>
+          ) : !canManage ? (
+            // The backend gates configure / disconnect on workspace owner/admin;
+            // point members at the (member-visible) Settings listing instead of
+            // a dead button.
+            <p className="text-xs text-muted-foreground">
+              {ts(($) => $.octo.members_note)}
+            </p>
+          ) : (
+            // Owner/admin on an Octo-enabled deployment: the shared button
+            // renders the Connect CTA or the already-connected status row.
+            <OctoAgentBindButton agentId={agent.id} agentName={agent.name} />
           )}
         </div>
       </section>

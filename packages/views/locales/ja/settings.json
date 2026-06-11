@@ -245,7 +245,13 @@
     "agent_id": "エージェント ID",
     "bot_token": "ボットトークン",
     "api_url": "API URL（任意）",
-    "saving": "保存中…"
+    "saving": "保存中…",
+    "bind_button": "Octo ボットを接続",
+    "bind_button_title": "{{agent}} に Octo ボットを接続",
+    "agent_connected_label": "Octo に接続済み",
+    "agent_bind_intro": "このエージェントに Octo ボットを接続すると、ユーザーは Octo から対話したり issue を作成したりできます。",
+    "members_note": "Octo ボットの接続・管理ができるのはワークスペースのオーナーと管理者のみです。管理者に設定を依頼してください。",
+    "not_enabled_note": "このデプロイでは Octo 連携が有効になっていません。"
   },
   "lark": {
     "section_title": "Lark",
