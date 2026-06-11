@@ -193,6 +193,12 @@ import {
   EMPTY_CREATE_BILLING_CHECKOUT_SESSION_RESPONSE,
   EMPTY_BILLING_CHECKOUT_SESSION_STATUS,
   EMPTY_CREATE_BILLING_PORTAL_SESSION_RESPONSE,
+  OctoInstallationSchema,
+  EMPTY_OCTO_INSTALLATION,
+  ListOctoInstallationsResponseSchema,
+  EMPTY_LIST_OCTO_INSTALLATIONS_RESPONSE,
+  RedeemOctoBindingTokenResponseSchema,
+  EMPTY_REDEEM_OCTO_BINDING_TOKEN_RESPONSE,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -2129,16 +2135,22 @@ export class ApiClient {
 
   // Octo IM integration
   async listOctoInstallations(workspaceId: string): Promise<ListOctoInstallationsResponse> {
-    return this.fetch(`/api/workspaces/${workspaceId}/octo/installations`);
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/octo/installations`);
+    return parseWithFallback(raw, ListOctoInstallationsResponseSchema, EMPTY_LIST_OCTO_INSTALLATIONS_RESPONSE, {
+      endpoint: "GET /api/workspaces/:id/octo/installations",
+    });
   }
 
   async createOctoInstallation(
     workspaceId: string,
     params: { agent_id: string; bot_token: string; api_url?: string },
   ): Promise<OctoInstallation> {
-    return this.fetch(`/api/workspaces/${workspaceId}/octo/installations`, {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/octo/installations`, {
       method: "POST",
       body: JSON.stringify(params),
+    });
+    return parseWithFallback(raw, OctoInstallationSchema, EMPTY_OCTO_INSTALLATION, {
+      endpoint: "POST /api/workspaces/:id/octo/installations",
     });
   }
 
@@ -2149,9 +2161,12 @@ export class ApiClient {
   }
 
   async redeemOctoBindingToken(token: string): Promise<RedeemOctoBindingTokenResponse> {
-    return this.fetch(`/api/octo/binding/redeem`, {
+    const raw = await this.fetch<unknown>(`/api/octo/binding/redeem`, {
       method: "POST",
       body: JSON.stringify({ token }),
+    });
+    return parseWithFallback(raw, RedeemOctoBindingTokenResponseSchema, EMPTY_REDEEM_OCTO_BINDING_TOKEN_RESPONSE, {
+      endpoint: "POST /api/octo/binding/redeem",
     });
   }
 }
