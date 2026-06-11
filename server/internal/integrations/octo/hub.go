@@ -23,6 +23,7 @@ const (
 	defaultLeaseRenew       = 30 * time.Second
 	defaultSweepInterval    = 30 * time.Second
 	defaultSuperviseBackoff = 5 * time.Second
+	defaultShutdownTimeout  = 10 * time.Second
 )
 
 // HubQueries is the subset of generated queries the Hub needs.
@@ -54,6 +55,10 @@ type HubConfig struct {
 	LeaseTTL           time.Duration
 	LeaseRenewInterval time.Duration
 	SweepInterval      time.Duration
+	// ShutdownTimeout bounds how long WaitWithTimeout blocks for supervisors to
+	// exit (and release their leases) during graceful shutdown. Zero falls back
+	// to defaultShutdownTimeout.
+	ShutdownTimeout time.Duration
 }
 
 func (c HubConfig) withDefaults() HubConfig {
@@ -65,6 +70,9 @@ func (c HubConfig) withDefaults() HubConfig {
 	}
 	if c.SweepInterval == 0 {
 		c.SweepInterval = defaultSweepInterval
+	}
+	if c.ShutdownTimeout == 0 {
+		c.ShutdownTimeout = defaultShutdownTimeout
 	}
 	return c
 }
@@ -336,6 +344,45 @@ func (h *Hub) shutdown() {
 	h.mu.Unlock()
 	h.wg.Wait()
 }
+
+// Wait blocks until every supervisor goroutine has exited. A supervisor only
+// returns after releasing its WS lease, so once Wait returns this replica holds
+// no leases and another replica can take over immediately (no LeaseTTL wait).
+// Callers must cancel the context passed to Run first, otherwise Wait blocks
+// forever. Prefer WaitWithTimeout in shutdown paths.
+func (h *Hub) Wait() {
+	h.wg.Wait()
+}
+
+// WaitWithTimeout is the bounded variant of Wait. Returns true if all
+// supervisors exited (and released their leases) within the deadline, false if
+// the timeout fired first. On timeout the process owner should log and proceed:
+// orphaned goroutines are reclaimed by the OS and any unreleased lease expires
+// naturally after LeaseTTL on the next replica. A timeout <= 0 falls back to
+// unbounded Wait.
+func (h *Hub) WaitWithTimeout(timeout time.Duration) bool {
+	if timeout <= 0 {
+		h.Wait()
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		h.Wait()
+		close(done)
+	}()
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
+// ShutdownTimeout exposes the configured graceful-shutdown deadline so main.go
+// can pass the same value to WaitWithTimeout without re-deriving it.
+func (h *Hub) ShutdownTimeout() time.Duration { return h.cfg.ShutdownTimeout }
 
 // sleepCtx sleeps for d or until ctx is cancelled; returns true if cancelled.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
