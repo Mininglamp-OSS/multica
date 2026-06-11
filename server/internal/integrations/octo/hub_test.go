@@ -241,3 +241,61 @@ func TestHub_InvokesReplierWithDispatchOutcome(t *testing.T) {
 		t.Errorf("replier got outcome %q, want %q", got, OutcomeNeedsBinding)
 	}
 }
+
+// TestHub_WaitWithTimeout_ReleasesLeaseBeforeReturning guards the graceful
+// shutdown fix: after the Run context is cancelled, WaitWithTimeout must block
+// until the supervisor has released its lease and only then return true. This
+// is the contract main.go relies on so the next replica can take over without
+// waiting out the full LeaseTTL.
+func TestHub_WaitWithTimeout_ReleasesLeaseBeforeReturning(t *testing.T) {
+	q := &fakeHubQueries{insts: []db.OctoInstallation{hubInst()}}
+	disp := &fakeHubDispatch{}
+
+	running := make(chan struct{}, 1)
+	factory := func(inst db.OctoInstallation) (Connector, error) {
+		return connectorFunc(func(ctx context.Context, inst db.OctoInstallation, onMessage func(transport.BotMessage)) error {
+			select {
+			case running <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		}), nil
+	}
+
+	hub := NewHub(q, factory, disp, HubConfig{
+		LeaseTTL:           time.Second,
+		LeaseRenewInterval: time.Second,
+		SweepInterval:      time.Second,
+		ShutdownTimeout:    3 * time.Second,
+	}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go hub.Run(ctx)
+
+	select {
+	case <-running:
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("connector never started")
+	}
+
+	// Cancel and join. WaitWithTimeout must return true (supervisor exited in
+	// time) and the lease must already be released by then.
+	cancel()
+	if ok := hub.WaitWithTimeout(hub.ShutdownTimeout()); !ok {
+		t.Fatal("WaitWithTimeout timed out; supervisor did not exit")
+	}
+	if _, released := q.counts(); released == 0 {
+		t.Error("lease was not released by the time WaitWithTimeout returned")
+	}
+}
+
+// TestHub_ShutdownTimeoutDefault confirms a zero ShutdownTimeout falls back to
+// the default rather than 0 (which WaitWithTimeout would treat as unbounded).
+func TestHub_ShutdownTimeoutDefault(t *testing.T) {
+	hub := NewHub(&fakeHubQueries{}, nil, &fakeHubDispatch{}, HubConfig{}, nil)
+	if got := hub.ShutdownTimeout(); got != defaultShutdownTimeout {
+		t.Errorf("ShutdownTimeout() = %v, want default %v", got, defaultShutdownTimeout)
+	}
+}

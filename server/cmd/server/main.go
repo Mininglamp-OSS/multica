@@ -449,6 +449,17 @@ func main() {
 		}
 	}
 
+	// Mirror the Lark join: wait for Octo supervisors to release their WS
+	// leases before exit, so the next replica can take over immediately instead
+	// of waiting out the full LeaseTTL.
+	if h.OctoHub != nil {
+		if !h.OctoHub.WaitWithTimeout(h.OctoHub.ShutdownTimeout()) {
+			slog.Warn("octo hub: supervisors did not exit within shutdown timeout; proceeding",
+				"timeout", h.OctoHub.ShutdownTimeout().String(),
+			)
+		}
+	}
+
 	if metricsServer != nil {
 		metricsShutdownCtx, metricsShutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		if err := metricsServer.Shutdown(metricsShutdownCtx); err != nil {
