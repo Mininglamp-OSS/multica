@@ -53,6 +53,13 @@ vi.mock("@multica/core/lark", () => ({
   }),
 }));
 
+vi.mock("@multica/core/octo", () => ({
+  octoInstallationsOptions: () => ({
+    queryKey: ["octo", "installations"],
+    queryFn: vi.fn(),
+  }),
+}));
+
 vi.mock("@multica/core/auth", () => {
   const useAuthStore = Object.assign(
     (sel?: (s: { user: { id: string } }) => unknown) =>
@@ -65,6 +72,15 @@ vi.mock("@multica/core/auth", () => {
 vi.mock("../../../settings/components/lark-tab", () => ({
   LarkAgentBindButton: ({ agentId }: { agentId: string }) => (
     <div data-testid="lark-bind-button" data-agent-id={agentId} />
+  ),
+}));
+
+// The Octo bind entry is exhaustively covered in octo-tab.test.tsx; stub it
+// here (like LarkAgentBindButton) so these tests assert IntegrationsTab's
+// branch selection without pulling in the real component's query-client deps.
+vi.mock("../../../settings/components/octo-tab", () => ({
+  OctoAgentBindButton: ({ agentId }: { agentId: string }) => (
+    <div data-testid="octo-bind-button" data-agent-id={agentId} />
   ),
 }));
 

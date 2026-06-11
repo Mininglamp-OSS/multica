@@ -245,7 +245,13 @@
     "agent_id": "Agent ID",
     "bot_token": "Bot token",
     "api_url": "API URL (optional)",
-    "saving": "Saving…"
+    "saving": "Saving…",
+    "bind_button": "Connect Octo bot",
+    "bind_button_title": "Connect an Octo bot to {{agent}}",
+    "agent_connected_label": "Connected to Octo",
+    "agent_bind_intro": "Connect an Octo bot to this agent so people can chat with it and create issues from Octo.",
+    "members_note": "Only workspace owners and admins can connect or manage Octo bots. Ask an admin to set it up.",
+    "not_enabled_note": "Octo integration is not enabled on this deployment."
   },
   "lark": {
     "section_title": "Lark",

@@ -322,7 +322,13 @@
     "agent_id": "에이전트 ID",
     "bot_token": "봇 토큰",
     "api_url": "API URL(선택)",
-    "saving": "저장 중…"
+    "saving": "저장 중…",
+    "bind_button": "Octo 봇 연결",
+    "bind_button_title": "{{agent}}에 Octo 봇 연결",
+    "agent_connected_label": "Octo에 연결됨",
+    "agent_bind_intro": "이 에이전트에 Octo 봇을 연결하면 사용자가 Octo에서 대화하고 이슈를 생성할 수 있습니다.",
+    "members_note": "Octo 봇 연결·관리는 워크스페이스 소유자와 관리자만 할 수 있습니다. 관리자에게 설정을 요청하세요.",
+    "not_enabled_note": "이 배포에서는 Octo 연동이 활성화되어 있지 않습니다."
   },
   "lark": {
     "section_title": "Lark",
