@@ -5,7 +5,13 @@ import {
   DashboardUsageDailyListSchema,
   DuplicateIssueErrorBodySchema,
   EMPTY_USER,
+  EMPTY_LIST_OCTO_INSTALLATIONS_RESPONSE,
+  EMPTY_OCTO_INSTALLATION,
+  EMPTY_REDEEM_OCTO_BINDING_TOKEN_RESPONSE,
   ListIssuesResponseSchema,
+  ListOctoInstallationsResponseSchema,
+  OctoInstallationSchema,
+  RedeemOctoBindingTokenResponseSchema,
   RuntimeHourlyActivityListSchema,
   RuntimeUsageByAgentListSchema,
   RuntimeUsageByHourListSchema,
@@ -268,5 +274,86 @@ describe("dashboard + runtime usage schema drift", () => {
       { date: "2026-05-19", region: "us-east" },
     ]);
     expect((parsed[0] as Record<string, unknown>).region).toBe("us-east");
+  });
+});
+
+describe("Octo schemas", () => {
+  it("parses a well-formed installations list and preserves unknown fields", () => {
+    const parsed = parseWithFallback(
+      {
+        installations: [
+          {
+            id: "i1",
+            workspace_id: "ws1",
+            agent_id: "a1",
+            robot_id: "r1",
+            bot_name: "Octo-Z",
+            installer_user_id: "u1",
+            status: "active",
+            installed_at: "2026-01-01T00:00:00Z",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+            future_field: "kept",
+          },
+        ],
+        configured: true,
+      },
+      ListOctoInstallationsResponseSchema,
+      EMPTY_LIST_OCTO_INSTALLATIONS_RESPONSE,
+      { endpoint: "test" },
+    );
+    expect(parsed.configured).toBe(true);
+    expect(parsed.installations).toHaveLength(1);
+    expect((parsed.installations[0] as unknown as Record<string, unknown>).future_field).toBe("kept");
+  });
+
+  it("downgrades an unknown status to a string instead of crashing (enum drift)", () => {
+    const parsed = parseWithFallback(
+      { installations: [{ id: "i1", status: "suspended" }], configured: true },
+      ListOctoInstallationsResponseSchema,
+      EMPTY_LIST_OCTO_INSTALLATIONS_RESPONSE,
+      { endpoint: "test" },
+    );
+    expect(parsed.installations[0]?.status).toBe("suspended");
+  });
+
+  it("falls back when installations is the wrong type", () => {
+    const parsed = parseWithFallback(
+      { installations: "not-an-array", configured: true },
+      ListOctoInstallationsResponseSchema,
+      EMPTY_LIST_OCTO_INSTALLATIONS_RESPONSE,
+      { endpoint: "test" },
+    );
+    expect(parsed).toEqual(EMPTY_LIST_OCTO_INSTALLATIONS_RESPONSE);
+  });
+
+  it("defaults missing OctoInstallation fields rather than throwing", () => {
+    const parsed = parseWithFallback(
+      { id: "i1" },
+      OctoInstallationSchema,
+      EMPTY_OCTO_INSTALLATION,
+      { endpoint: "test" },
+    );
+    expect(parsed.id).toBe("i1");
+    expect(parsed.status).toBe("active");
+    expect(parsed.bot_name).toBe("");
+  });
+
+  it("parses a redeem response and falls back on a non-object body", () => {
+    const ok = parseWithFallback(
+      { workspace_id: "ws1", installation_id: "i1", octo_uid: "uid1" },
+      RedeemOctoBindingTokenResponseSchema,
+      EMPTY_REDEEM_OCTO_BINDING_TOKEN_RESPONSE,
+      { endpoint: "test" },
+    );
+    expect(ok.installation_id).toBe("i1");
+
+    const bad = parseWithFallback(
+      null,
+      RedeemOctoBindingTokenResponseSchema,
+      EMPTY_REDEEM_OCTO_BINDING_TOKEN_RESPONSE,
+      { endpoint: "test" },
+    );
+    expect(bad).toEqual(EMPTY_REDEEM_OCTO_BINDING_TOKEN_RESPONSE);
   });
 });

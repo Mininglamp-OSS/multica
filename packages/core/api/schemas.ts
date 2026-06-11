@@ -16,6 +16,9 @@ import type {
   GroupedIssuesResponse,
   ListIssuesResponse,
   ListWebhookDeliveriesResponse,
+  ListOctoInstallationsResponse,
+  OctoInstallation,
+  RedeemOctoBindingTokenResponse,
   Squad,
   TimelineEntry,
   User,
@@ -897,4 +900,61 @@ export const CreateBillingPortalSessionResponseSchema = z.object({
 
 export const EMPTY_CREATE_BILLING_PORTAL_SESSION_RESPONSE: CreateBillingPortalSessionResponse = {
   url: "",
+};
+
+// ---------------------------------------------------------------------------
+// Octo IM integration. Mirrors OctoInstallationResponse /
+// ListOctoInstallationsResponse / RedeemOctoBindingTokenResponse in
+// server/internal/handler/octo.go. Every field is optional-with-default so an
+// older desktop build keeps parsing when the backend adds fields, and `status`
+// is a lax string (enum drift downgrades, never crashes — see CLAUDE.md → API
+// Response Compatibility).
+// ---------------------------------------------------------------------------
+
+export const OctoInstallationSchema = z.object({
+  id: z.string().optional().default(""),
+  workspace_id: z.string().optional().default(""),
+  agent_id: z.string().optional().default(""),
+  robot_id: z.string().optional().default(""),
+  bot_name: z.string().optional().default(""),
+  installer_user_id: z.string().optional().default(""),
+  status: z.string().optional().default("active"),
+  installed_at: z.string().optional().default(""),
+  created_at: z.string().optional().default(""),
+  updated_at: z.string().optional().default(""),
+}).loose();
+
+export const EMPTY_OCTO_INSTALLATION: OctoInstallation = {
+  id: "",
+  workspace_id: "",
+  agent_id: "",
+  robot_id: "",
+  bot_name: "",
+  installer_user_id: "",
+  status: "active",
+  installed_at: "",
+  created_at: "",
+  updated_at: "",
+};
+
+export const ListOctoInstallationsResponseSchema = z.object({
+  installations: z.array(OctoInstallationSchema).default([]),
+  configured: z.boolean().optional().default(false),
+}).loose();
+
+export const EMPTY_LIST_OCTO_INSTALLATIONS_RESPONSE: ListOctoInstallationsResponse = {
+  installations: [],
+  configured: false,
+};
+
+export const RedeemOctoBindingTokenResponseSchema = z.object({
+  workspace_id: z.string().optional().default(""),
+  installation_id: z.string().optional().default(""),
+  octo_uid: z.string().optional().default(""),
+}).loose();
+
+export const EMPTY_REDEEM_OCTO_BINDING_TOKEN_RESPONSE: RedeemOctoBindingTokenResponse = {
+  workspace_id: "",
+  installation_id: "",
+  octo_uid: "",
 };
