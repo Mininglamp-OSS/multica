@@ -119,6 +119,73 @@ func TestProcessEvent_TaskFailed_SendsError(t *testing.T) {
 	}
 }
 
+func TestProcessEvent_TaskFailed_FallsBackToFailureReason(t *testing.T) {
+	q := &fakePatcherQueries{binding: octoBinding(), inst: activeInst()}
+	s := &fakeSender{}
+	p := newPatcher(q, s)
+
+	// No explicit error string — only the coarse classifier. The relay must
+	// translate it into the friendly Chinese copy, not the generic fallback.
+	e := events.Event{
+		Type:          protocol.EventTaskFailed,
+		TaskID:        "11111111-1111-1111-1111-111111111111",
+		ChatSessionID: "22222222-2222-2222-2222-222222222222",
+		Payload:       map[string]any{"failure_reason": "agent_error.provider_auth_or_access"},
+	}
+	if err := p.processEvent(context.Background(), e); err != nil {
+		t.Fatalf("processEvent: %v", err)
+	}
+	want := "⚠️ " + failureReasonText["agent_error.provider_auth_or_access"]
+	if s.sent != 1 || s.lastTxt != want {
+		t.Errorf("sent=%d lastTxt=%q, want %q", s.sent, s.lastTxt, want)
+	}
+}
+
+func TestProcessEvent_TaskFailed_DefaultWhenNoDetail(t *testing.T) {
+	q := &fakePatcherQueries{binding: octoBinding(), inst: activeInst()}
+	s := &fakeSender{}
+	p := newPatcher(q, s)
+
+	// Neither error nor failure_reason — the user still gets an actionable,
+	// non-empty message rather than a bare or English fallback.
+	e := events.Event{
+		Type:          protocol.EventTaskFailed,
+		TaskID:        "11111111-1111-1111-1111-111111111111",
+		ChatSessionID: "22222222-2222-2222-2222-222222222222",
+		Payload:       map[string]any{},
+	}
+	if err := p.processEvent(context.Background(), e); err != nil {
+		t.Fatalf("processEvent: %v", err)
+	}
+	if s.sent != 1 || s.lastTxt != "⚠️ "+defaultFailureMessage {
+		t.Errorf("sent=%d lastTxt=%q, want default", s.sent, s.lastTxt)
+	}
+}
+
+func TestFailureMessageFromPayload(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload any
+		want    string
+	}{
+		{"explicit error wins", map[string]any{"error": "boom", "failure_reason": "timeout"}, "boom"},
+		{"error_message alias", map[string]any{"error_message": "kaboom"}, "kaboom"},
+		{"known reason", map[string]any{"failure_reason": "runtime_offline"}, failureReasonText["runtime_offline"]},
+		{"unknown reason downgrades", map[string]any{"failure_reason": "some_future_reason"}, defaultFailureMessage},
+		{"empty map", map[string]any{}, defaultFailureMessage},
+		{"non-map payload", "not a map", defaultFailureMessage},
+		{"nil payload", nil, defaultFailureMessage},
+		{"empty error falls through to reason", map[string]any{"error": "", "failure_reason": "timeout"}, failureReasonText["timeout"]},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := failureMessageFromPayload(tc.payload); got != tc.want {
+				t.Errorf("failureMessageFromPayload(%v) = %q, want %q", tc.payload, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProcessEvent_WebOnlySession_Skips(t *testing.T) {
 	q := &fakePatcherQueries{bindingErr: pgx.ErrNoRows}
 	s := &fakeSender{}
