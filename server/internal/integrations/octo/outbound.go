@@ -124,11 +124,7 @@ func (p *Patcher) processEvent(ctx context.Context, e events.Event) error {
 	case protocol.EventChatDone:
 		return p.sendReply(ctx, inst, binding, taskID, chatDoneContent(e.Payload), token)
 	case protocol.EventTaskFailed:
-		msg := errorMessageFromPayload(e.Payload)
-		if msg == "" {
-			msg = "The agent run failed."
-		}
-		return p.sendReply(ctx, inst, binding, taskID, "⚠️ "+msg, token)
+		return p.sendReply(ctx, inst, binding, taskID, "⚠️ "+failureMessageFromPayload(e.Payload), token)
 	}
 	return nil
 }
@@ -213,14 +209,63 @@ func chatDoneContent(payload any) string {
 	return ""
 }
 
-func errorMessageFromPayload(payload any) string {
-	if m, ok := payload.(map[string]any); ok {
-		if s, ok := m["error"].(string); ok && s != "" {
-			return s
-		}
-		if s, ok := m["error_message"].(string); ok && s != "" {
-			return s
-		}
+// failureMessageFromPayload builds the user-facing text for a task:failed
+// event. Precedence:
+//  1. The explicit error / error_message string (the redacted detail the
+//     daemon reported) — most actionable.
+//  2. A friendly Chinese description of the coarse failure_reason classifier.
+//  3. A generic fallback when neither is present.
+//
+// The IM user should never be left with a bare "运行失败" when the backend
+// actually knows what went wrong.
+func failureMessageFromPayload(payload any) string {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return defaultFailureMessage
 	}
-	return ""
+	if s, ok := m["error"].(string); ok && s != "" {
+		return s
+	}
+	if s, ok := m["error_message"].(string); ok && s != "" {
+		return s
+	}
+	if reason, ok := m["failure_reason"].(string); ok && reason != "" {
+		if desc, ok := failureReasonText[reason]; ok {
+			return desc
+		}
+		// Unknown reason (a classifier value added server-side later):
+		// downgrade to the generic message rather than leaking a raw enum.
+		return defaultFailureMessage
+	}
+	return defaultFailureMessage
+}
+
+const defaultFailureMessage = "Agent 运行失败，请稍后重试或联系工作区管理员。"
+
+// failureReasonText maps the taskfailure.Reason string values to friendly
+// Chinese copy. Keep the keys in sync with server/pkg/taskfailure/failure.go;
+// a missing key falls back to defaultFailureMessage, so drift downgrades
+// gracefully rather than crashing.
+var failureReasonText = map[string]string{
+	"queued_expired":                              "任务排队超时，未被任何 runtime 领取。请确认 Agent 的 daemon 在线。",
+	"runtime_offline":                             "Agent 的 runtime 当前离线，消息已记录。请确认 daemon 在线后重试。",
+	"runtime_recovery":                            "Agent 的 runtime 正在恢复中，请稍后重试。",
+	"timeout":                                     "Agent 运行超时，请稍后重试。",
+	"iteration_limit":                             "Agent 达到迭代上限，未能完成。请简化请求或重试。",
+	"agent_blocked":                               "Agent 被阻塞，无法继续。请联系工作区管理员。",
+	"api_invalid_request":                         "请求无效，Agent 无法处理。请调整后重试。",
+	"agent_error.provider_auth_or_access":         "模型服务认证失败，请检查 Agent runtime 的 API Key 配置。",
+	"agent_error.provider_quota_limit":            "模型服务额度已用尽，请检查账户额度。",
+	"agent_error.provider_capacity_or_rate_limit": "模型服务繁忙或触发限流，请稍后重试。",
+	"agent_error.provider_server_error":           "模型服务返回错误，请稍后重试。",
+	"agent_error.provider_network":                "连接模型服务失败，请检查网络后重试。",
+	"agent_error.process_failure":                 "Agent 进程异常退出，请联系工作区管理员。",
+	"agent_error.empty_or_unparseable_output":     "Agent 未返回有效结果，请重试。",
+	"agent_error.agent_timeout":                   "Agent 运行超时，请稍后重试。",
+	"agent_error.context_overflow":                "对话上下文过长，Agent 无法处理。请精简内容后重试。",
+	"agent_error.missing_config":                  "Agent runtime 缺少必要配置（如环境变量），请联系工作区管理员。",
+	"agent_error.model_not_found_or_unavailable":  "指定的模型不存在或不可用，请检查 Agent 的模型配置。",
+	"agent_error.runtime_version_unsupported":     "Agent runtime 版本不受支持，请升级后重试。",
+	"agent_error.runtime_missing_executable":      "Agent runtime 缺少所需的可执行文件，请检查安装。",
+	"agent_error.unknown":                         defaultFailureMessage,
 }

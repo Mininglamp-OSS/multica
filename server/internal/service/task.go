@@ -1766,17 +1766,28 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 		}
 
 		if workspaceID != "" {
+			payload := map[string]any{
+				"task_id":        util.UUIDToString(t.ID),
+				"agent_id":       util.UUIDToString(t.AgentID),
+				"issue_id":       util.UUIDToString(t.IssueID),
+				"status":         "failed",
+				"failure_reason": failureReason,
+			}
+			// Chat tasks carry no issue_id; the outbound relays route on the
+			// chat session, so it must be present or the IM reply is dropped.
+			if t.ChatSessionID.Valid {
+				payload["chat_session_id"] = util.UUIDToString(t.ChatSessionID)
+			}
+			// Redacted human-readable detail so the IM user sees the actual
+			// cause, not just "agent run failed".
+			if t.Error.Valid && t.Error.String != "" {
+				payload["error"] = redact.Text(t.Error.String)
+			}
 			s.Bus.Publish(events.Event{
 				Type:        protocol.EventTaskFailed,
 				WorkspaceID: workspaceID,
 				ActorType:   "system",
-				Payload: map[string]any{
-					"task_id":        util.UUIDToString(t.ID),
-					"agent_id":       util.UUIDToString(t.AgentID),
-					"issue_id":       util.UUIDToString(t.IssueID),
-					"status":         "failed",
-					"failure_reason": failureReason,
-				},
+				Payload:     payload,
 			})
 		}
 
@@ -2006,6 +2017,17 @@ func (s *TaskService) broadcastTaskEvent(ctx context.Context, eventType string, 
 	}
 	if task.ChatSessionID.Valid {
 		payload["chat_session_id"] = util.UUIDToString(task.ChatSessionID)
+	}
+	// Surface the failure detail to event consumers (e.g. the Octo/Lark
+	// outbound relays) so an IM user sees what went wrong instead of a generic
+	// "agent run failed". error is the redacted human-readable message; the
+	// coarse failure_reason is the machine classifier. Both are only set on a
+	// failed task row, so a completed/cancelled task simply omits them.
+	if task.FailureReason.Valid && task.FailureReason.String != "" {
+		payload["failure_reason"] = task.FailureReason.String
+	}
+	if task.Error.Valid && task.Error.String != "" {
+		payload["error"] = redact.Text(task.Error.String)
 	}
 	s.Bus.Publish(events.Event{
 		Type:        eventType,
