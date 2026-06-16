@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -261,16 +262,32 @@ func (d *Dispatcher) deliver(sub db.WebhookSubscription, event string, body []by
 			return
 		}
 
-		retryable := err != nil || status >= 500
+		// 429 is "retry later", not a permanent rejection.
+		retryable := err != nil || status == http.StatusTooManyRequests || status >= 500
 		slog.Warn("outwebhook: delivery attempt failed",
 			"subscription_id", subID, "event", event, "host", host,
-			"status", status, "attempt", attempt+1, "retryable", retryable, "error", err)
+			"status", status, "attempt", attempt+1, "retryable", retryable, "error", redactErr(err))
 		if !retryable {
 			return // 4xx — endpoint rejected the payload; retrying won't help.
 		}
 	}
 	slog.Error("outwebhook: delivery exhausted retries",
 		"subscription_id", subID, "event", event, "host", host)
+}
+
+// redactErr renders a transport error for logging without leaking the request
+// URL. http.Client.Do returns a *url.Error whose Error() embeds the full URL
+// (path + query + userinfo), which for webhook subscribers routinely carries
+// tokens — so we log only the underlying cause + operation, never the URL.
+func redactErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Err != nil {
+		return ue.Op + ": " + ue.Err.Error()
+	}
+	return err.Error()
 }
 
 // hostOf returns the host of a webhook URL for logging, omitting any

@@ -3,8 +3,10 @@ package outwebhook
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -280,5 +282,77 @@ func waitTimeout(t *testing.T, wg *sync.WaitGroup, d time.Duration) {
 	case <-done:
 	case <-time.After(d):
 		t.Fatal("timed out waiting for deliveries")
+	}
+}
+
+func TestRedactErr(t *testing.T) {
+	// A *url.Error embeds the full URL (with tokens) in its Error(); redactErr
+	// must drop the URL and keep only the operation + underlying cause.
+	ue := &url.Error{
+		Op:  "Post",
+		URL: "https://hooks.example.com/in?token=SUPERSECRET",
+		Err: fmt.Errorf("context deadline exceeded"),
+	}
+	got := redactErr(ue)
+	if got != "Post: context deadline exceeded" {
+		t.Fatalf("redactErr = %q, want %q", got, "Post: context deadline exceeded")
+	}
+	if got == "" || containsSecret(got) {
+		t.Fatalf("redactErr leaked URL/token: %q", got)
+	}
+	if redactErr(nil) != "" {
+		t.Errorf("redactErr(nil) should be empty")
+	}
+	// Non-url errors pass through.
+	if redactErr(fmt.Errorf("plain")) != "plain" {
+		t.Errorf("redactErr(plain) mismatch")
+	}
+}
+
+func containsSecret(s string) bool {
+	for i := 0; i+11 <= len(s); i++ {
+		if s[i:i+11] == "SUPERSECRET" {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDeliverRetriesOn429(t *testing.T) {
+	c := &collector{wg: &sync.WaitGroup{}}
+	c.failNext.Store(1) // fail once, then succeed
+	// Make the failure a 429 rather than 500.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(body)
+		c.mu.Lock()
+		c.bodies = append(c.bodies, body)
+		c.mu.Unlock()
+		if c.failNext.Load() > 0 {
+			c.failNext.Add(-1)
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		c.wg.Done()
+	}))
+	defer srv.Close()
+
+	orig := retryBackoff
+	retryBackoff = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	defer func() { retryBackoff = orig }()
+
+	store := &fakeStore{subs: []db.WebhookSubscription{
+		sub(t, subID1, "", []string{EventIssueStatusChanged}, srv.URL),
+	}}
+	d := newWithClient(store, &http.Client{Timeout: deliveryTimeout})
+	c.wg.Add(1)
+	d.DispatchIssueStatusChanged(IssueStatusChanged{WorkspaceID: wsID, Issue: map[string]any{"id": "i"}})
+
+	waitTimeout(t, c.wg, 5*time.Second)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.bodies) != 2 {
+		t.Fatalf("429 should be retried: expected 2 attempts, got %d", len(c.bodies))
 	}
 }
