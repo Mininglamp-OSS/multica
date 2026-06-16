@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,5 +78,31 @@ func TestRestrictedClientRefusesRedirectToLoopback(t *testing.T) {
 	if err == nil {
 		resp.Body.Close()
 		t.Fatalf("expected refusal, got status %d", resp.StatusCode)
+	}
+}
+
+// TestRestrictedClientIgnoresProxyEnv proves the client does not honor
+// HTTP(S)_PROXY: with a proxy configured, a request to a loopback target must
+// still be refused by the dial guard (which only runs on direct connections),
+// not tunneled to the proxy. If the proxy were used, the guard would never see
+// the target host and the error would be a proxy-connect failure instead.
+func TestRestrictedClientIgnoresProxyEnv(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://10.0.0.1:3128")
+	t.Setenv("HTTPS_PROXY", "http://10.0.0.1:3128")
+	t.Setenv("ALL_PROXY", "http://10.0.0.1:3128")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewRestrictedHTTPClient(5 * time.Second)
+	resp, err := client.Get(srv.URL)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("expected refusal for loopback target, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(err.Error(), "refusing to connect to internal") {
+		t.Fatalf("dial guard must fire (proxy must be disabled); got: %v", err)
 	}
 }

@@ -55,6 +55,14 @@ const (
 	// the queue is full a delivery is dropped + logged rather than letting
 	// dispatch goroutines pile up waiting for a slot (fire-and-forget v1).
 	queueCapacity = 1024
+	// numDispatchWorkers bounds the goroutines that run the per-event
+	// subscription lookup + filter + marshal. Without this, a status-change
+	// storm (e.g. a large batch update) would spawn one goroutine per event,
+	// each holding a DB query for up to listTimeout — unbounded query pressure.
+	numDispatchWorkers = 4
+	// eventQueueCapacity bounds buffered events awaiting dispatch. Enqueue is
+	// non-blocking (drop + log on full), so the event bus is never blocked.
+	eventQueueCapacity = 1024
 )
 
 // retryBackoff is the wait before attempt N+1 (index 0 = wait before the first
@@ -75,15 +83,16 @@ type deliverJob struct {
 	body []byte
 }
 
-// Dispatcher fans an event out to matching subscriptions via a bounded worker
-// pool.
+// Dispatcher fans an event out to matching subscriptions via bounded worker
+// pools — one stage for the per-event subscription lookup, one for delivery.
 type Dispatcher struct {
 	store  Store
 	client *http.Client
+	events chan IssueStatusChanged
 	jobs   chan deliverJob
 }
 
-// New builds a Dispatcher and starts its worker pool. The HTTP client is
+// New builds a Dispatcher and starts its worker pools. The HTTP client is
 // SSRF-restricted (rejects internal addresses at dial time, on every redirect
 // hop) and carries a fixed per-request timeout; retries are handled per attempt.
 func New(store Store) *Dispatcher {
@@ -97,12 +106,25 @@ func newWithClient(store Store, client *http.Client) *Dispatcher {
 	d := &Dispatcher{
 		store:  store,
 		client: client,
+		events: make(chan IssueStatusChanged, eventQueueCapacity),
 		jobs:   make(chan deliverJob, queueCapacity),
+	}
+	for i := 0; i < numDispatchWorkers; i++ {
+		go d.dispatchWorker()
 	}
 	for i := 0; i < numWorkers; i++ {
 		go d.worker()
 	}
 	return d
+}
+
+// dispatchWorker drains the event queue, running the subscription lookup +
+// filter + marshal for each event. Bounded to numDispatchWorkers so concurrent
+// DB queries can't grow with event volume.
+func (d *Dispatcher) dispatchWorker() {
+	for ev := range d.events {
+		d.dispatch(ev)
+	}
 }
 
 // worker drains the delivery queue. A delivery panic is recovered so a single
@@ -152,17 +174,22 @@ type outboundPayload struct {
 	DeliveredAt    string       `json:"delivered_at"`
 }
 
-// DispatchIssueStatusChanged hands the event off to a background goroutine and
+// DispatchIssueStatusChanged hands the event to the bounded dispatch queue and
 // returns immediately. The event bus invokes listeners synchronously on the
 // issue-update HTTP request path, so NO work here may touch that path — not the
-// subscription DB query, not JSON marshaling, not delivery. Everything happens
-// in dispatch().
+// subscription DB query, not JSON marshaling, not delivery. Enqueue is
+// non-blocking: a full queue drops the event (fire-and-forget v1) rather than
+// blocking the bus.
 func (d *Dispatcher) DispatchIssueStatusChanged(ev IssueStatusChanged) {
-	go d.dispatch(ev)
+	select {
+	case d.events <- ev:
+	default:
+		slog.Warn("outwebhook: event queue full, dropping", "workspace_id", ev.WorkspaceID)
+	}
 }
 
-// dispatch (off the request path) selects matching subscriptions and spawns a
-// bounded set of delivery goroutines.
+// dispatch (off the request path, on a bounded dispatch worker) selects matching
+// subscriptions and enqueues their deliveries.
 func (d *Dispatcher) dispatch(ev IssueStatusChanged) {
 	wsUUID, err := util.ParseUUID(ev.WorkspaceID)
 	if err != nil {

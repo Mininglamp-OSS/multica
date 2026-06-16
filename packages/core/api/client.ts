@@ -2117,7 +2117,9 @@ export class ApiClient {
       raw,
       WebhookSubscriptionResponseSchema,
       EMPTY_WEBHOOK_SUBSCRIPTION,
-      { endpoint: "POST /api/webhook-subscriptions" },
+      // redact the one-time signing secret so a schema drift can't log a live
+      // credential via parseWithFallback's `received` body.
+      { endpoint: "POST /api/webhook-subscriptions", redact: ["secret"] },
     );
   }
 

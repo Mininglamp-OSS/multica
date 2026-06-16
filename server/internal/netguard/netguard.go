@@ -33,10 +33,17 @@ func IsBlockedIP(ip net.IP) bool {
 //
 // Redirects use Go's default policy; because every hop re-dials through this
 // transport, a redirect to an internal target is rejected at dial time too.
+//
+// Proxy is explicitly disabled (Proxy: nil): with http.ProxyFromEnvironment, a
+// configured HTTP_PROXY/HTTPS_PROXY would make Go dial the proxy instead of the
+// target, so DialContext would only see the proxy address and the user-supplied
+// host would never reach IsBlockedIP — a complete SSRF bypass. This client is
+// used solely for webhook delivery, so forcing direct connections has no
+// collateral impact.
 func NewRestrictedHTTPClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		Proxy:                 nil,
 		DialContext:           restrictedDialContext(dialer),
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
