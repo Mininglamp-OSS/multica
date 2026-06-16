@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -126,8 +127,7 @@ type collector struct {
 }
 
 func (c *collector) handler(w http.ResponseWriter, r *http.Request) {
-	body := make([]byte, r.ContentLength)
-	_, _ = r.Body.Read(body)
+	body, _ := io.ReadAll(r.Body)
 	c.mu.Lock()
 	c.bodies = append(c.bodies, body)
 	c.sigs = append(c.sigs, r.Header.Get("X-Multica-Signature-256"))
@@ -342,8 +342,7 @@ func TestDeliverRetriesOn429(t *testing.T) {
 	c.failNext.Store(1) // fail once, then succeed
 	// Make the failure a 429 rather than 500.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body := make([]byte, r.ContentLength)
-		_, _ = r.Body.Read(body)
+		body, _ := io.ReadAll(r.Body)
 		c.mu.Lock()
 		c.bodies = append(c.bodies, body)
 		c.mu.Unlock()

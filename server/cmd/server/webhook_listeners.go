@@ -18,16 +18,15 @@ import (
 // Delivery itself is async (the dispatcher detaches each POST), so this listener
 // never blocks the synchronous bus dispatch.
 //
-// Scope of issue.status_changed (v1): it fires for the user/API/PR-merge status
-// transitions that publish issue:updated with status_changed=true — single
-// update, batch update, and the GitHub PR-merged path. It does NOT fire for
-// system-internal status mutations that bypass that event, e.g. the agent
-// task-failure reset and the stuck-issue sweeper (in_progress → todo), which
-// write status directly via UpdateIssueStatus and publish only task events.
-// This matches how the existing inbound autopilot webhooks consume the same
-// event; widening the producer to emit status_changed on every internal path is
-// out of scope for this feature. Subscribers should treat the event as
-// "user/API-initiated status change", not "every possible status mutation".
+// Scope of issue.status_changed (v1): it fires for status transitions published
+// as issue:updated with status_changed=true. That covers user/API/PR-merge
+// changes (single update, batch update, PR-merged) AND the system-internal
+// agent task-failure / stuck-issue auto-reset (in_progress → todo), which now
+// publishes a status_changed event from TaskService.HandleFailedTasks. It does
+// NOT fire for status mutations that never publish issue:updated with
+// status_changed. The issue payload arrives in one of two shapes — the typed
+// handler.IssueResponse (handler paths) or a map[string]any (service paths) —
+// and both are handled below.
 func registerWebhookListeners(bus *events.Bus, d *outwebhook.Dispatcher) {
 	bus.Subscribe(protocol.EventIssueUpdated, func(e events.Event) {
 		payload, ok := e.Payload.(map[string]any)
@@ -38,17 +37,12 @@ func registerWebhookListeners(bus *events.Bus, d *outwebhook.Dispatcher) {
 		if !statusChanged {
 			return
 		}
-		issue, ok := payload["issue"].(handler.IssueResponse)
+		projectID, issue, ok := webhookIssuePayload(payload["issue"])
 		if !ok {
-			slog.Debug("webhook listener: issue payload not IssueResponse")
+			slog.Debug("webhook listener: unrecognized issue payload shape")
 			return
 		}
 		prevStatus, _ := payload["prev_status"].(string)
-
-		projectID := ""
-		if issue.ProjectID != nil {
-			projectID = *issue.ProjectID
-		}
 
 		d.DispatchIssueStatusChanged(outwebhook.IssueStatusChanged{
 			WorkspaceID:    e.WorkspaceID,
@@ -59,4 +53,31 @@ func registerWebhookListeners(bus *events.Bus, d *outwebhook.Dispatcher) {
 			Issue:          issue,
 		})
 	})
+}
+
+// webhookIssuePayload extracts the project id (for project-level routing) and
+// the issue body to embed in the webhook, from either shape of the issue:updated
+// payload: the typed handler.IssueResponse (handler paths) or the map[string]any
+// emitted by service-layer status changes (e.g. issueToMap). Returns ok=false
+// when neither shape is present.
+func webhookIssuePayload(raw any) (projectID string, issue any, ok bool) {
+	switch v := raw.(type) {
+	case handler.IssueResponse:
+		if v.ProjectID != nil {
+			projectID = *v.ProjectID
+		}
+		return projectID, v, true
+	case map[string]any:
+		switch p := v["project_id"].(type) {
+		case string:
+			projectID = p
+		case *string:
+			if p != nil {
+				projectID = *p
+			}
+		}
+		return projectID, v, true
+	default:
+		return "", nil, false
+	}
 }
