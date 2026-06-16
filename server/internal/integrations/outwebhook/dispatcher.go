@@ -4,9 +4,9 @@
 // there, external systems POST to Multica; here, Multica POSTs to external URLs.
 //
 // v1 emits a single event type, issue.status_changed, to webhook_subscription
-// rows. Delivery is async fire-and-forget: each subscription is delivered in its
-// own goroutine with a couple of immediate retries on network error / 5xx, and
-// outcomes are logged (no delivery-history persistence in v1).
+// rows. Delivery is async fire-and-forget: a fixed pool of workers drains a
+// bounded queue, each delivery does a couple of immediate retries on network
+// error / 5xx, and outcomes are logged (no delivery-history persistence in v1).
 package outwebhook
 
 import (
@@ -17,11 +17,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/multica-ai/multica/server/internal/netguard"
 	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/internal/webhooksign"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -45,12 +47,14 @@ const (
 	// goroutine (not the request path), so a slow query never blocks an issue
 	// update — the timeout just stops a stuck query from leaking a goroutine.
 	listTimeout = 10 * time.Second
-	// maxConcurrentDeliveries caps in-flight outbound POSTs across the whole
-	// process. Without a cap, a burst of status changes in a workspace with
-	// many webhooks would spawn an unbounded number of goroutines, each holding
-	// the payload and sleeping through retry backoff. Excess deliveries queue
-	// on the semaphore instead.
-	maxConcurrentDeliveries = 16
+	// numWorkers is the fixed number of delivery goroutines. They are the only
+	// goroutines that perform outbound POSTs, so concurrent in-flight deliveries
+	// can never exceed this regardless of event volume.
+	numWorkers = 16
+	// queueCapacity bounds buffered deliveries. Enqueue is non-blocking: when
+	// the queue is full a delivery is dropped + logged rather than letting
+	// dispatch goroutines pile up waiting for a slot (fire-and-forget v1).
+	queueCapacity = 1024
 )
 
 // retryBackoff is the wait before attempt N+1 (index 0 = wait before the first
@@ -64,22 +68,59 @@ type Store interface {
 	ListEnabledWebhookSubscriptionsForDispatch(ctx context.Context, workspaceID pgtype.UUID) ([]db.WebhookSubscription, error)
 }
 
-// Dispatcher fans an event out to matching subscriptions.
+// deliverJob is one queued delivery: a subscription + the marshaled body shared
+// (read-only) across retries.
+type deliverJob struct {
+	sub  db.WebhookSubscription
+	body []byte
+}
+
+// Dispatcher fans an event out to matching subscriptions via a bounded worker
+// pool.
 type Dispatcher struct {
 	store  Store
 	client *http.Client
-	// sem bounds concurrent deliveries (see maxConcurrentDeliveries).
-	sem chan struct{}
+	jobs   chan deliverJob
 }
 
-// New builds a Dispatcher. The HTTP client carries a fixed per-request timeout;
-// retries are handled per attempt, not by the client.
+// New builds a Dispatcher and starts its worker pool. The HTTP client is
+// SSRF-restricted (rejects internal addresses at dial time, on every redirect
+// hop) and carries a fixed per-request timeout; retries are handled per attempt.
 func New(store Store) *Dispatcher {
-	return &Dispatcher{
+	return newWithClient(store, netguard.NewRestrictedHTTPClient(deliveryTimeout))
+}
+
+// newWithClient is the shared constructor. Tests use it to inject a permissive
+// client so they can exercise delivery against a loopback httptest server (the
+// SSRF guard itself is covered by the netguard package tests).
+func newWithClient(store Store, client *http.Client) *Dispatcher {
+	d := &Dispatcher{
 		store:  store,
-		client: &http.Client{Timeout: deliveryTimeout},
-		sem:    make(chan struct{}, maxConcurrentDeliveries),
+		client: client,
+		jobs:   make(chan deliverJob, queueCapacity),
 	}
+	for i := 0; i < numWorkers; i++ {
+		go d.worker()
+	}
+	return d
+}
+
+// worker drains the delivery queue. A delivery panic is recovered so a single
+// bad delivery can never kill a long-lived worker.
+func (d *Dispatcher) worker() {
+	for job := range d.jobs {
+		d.safeDeliver(job)
+	}
+}
+
+func (d *Dispatcher) safeDeliver(job deliverJob) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("outwebhook: delivery panic recovered",
+				"subscription_id", util.UUIDToString(job.sub.ID), "recovered", r)
+		}
+	}()
+	d.deliver(job.sub, EventIssueStatusChanged, job.body)
 }
 
 // IssueStatusChanged describes a single issue status transition. The listener
@@ -161,14 +202,15 @@ func (d *Dispatcher) dispatch(ev IssueStatusChanged) {
 	}
 
 	for _, s := range matched {
-		// Acquire a slot before spawning so concurrent deliveries stay bounded;
-		// this goroutine blocks here when the semaphore is full, providing
-		// backpressure instead of unbounded goroutine growth.
-		d.sem <- struct{}{}
-		go func(sub db.WebhookSubscription) {
-			defer func() { <-d.sem }()
-			d.deliver(sub, EventIssueStatusChanged, body)
-		}(s)
+		// Non-blocking enqueue: a full queue drops the delivery (fire-and-forget
+		// v1) rather than letting this dispatch goroutine block, which would let
+		// dispatch goroutines accumulate under a status-change storm.
+		select {
+		case d.jobs <- deliverJob{sub: s, body: body}:
+		default:
+			slog.Warn("outwebhook: delivery queue full, dropping",
+				"subscription_id", util.UUIDToString(s.ID), "host", hostOf(s.Url))
+		}
 	}
 }
 
@@ -177,6 +219,8 @@ func (d *Dispatcher) deliver(sub db.WebhookSubscription, event string, body []by
 	deliveryID := uuid.NewString()
 	signature := webhooksign.Sign(sub.Secret, body)
 	subID := util.UUIDToString(sub.ID)
+	// Log host only — subscriber URLs frequently carry tokens in path/query.
+	host := hostOf(sub.Url)
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
@@ -192,14 +236,24 @@ func (d *Dispatcher) deliver(sub db.WebhookSubscription, event string, body []by
 
 		retryable := err != nil || status >= 500
 		slog.Warn("outwebhook: delivery attempt failed",
-			"subscription_id", subID, "event", event, "url", sub.Url,
+			"subscription_id", subID, "event", event, "host", host,
 			"status", status, "attempt", attempt+1, "retryable", retryable, "error", err)
 		if !retryable {
 			return // 4xx — endpoint rejected the payload; retrying won't help.
 		}
 	}
 	slog.Error("outwebhook: delivery exhausted retries",
-		"subscription_id", subID, "event", event, "url", sub.Url)
+		"subscription_id", subID, "event", event, "host", host)
+}
+
+// hostOf returns the host of a webhook URL for logging, omitting any
+// path/query that may carry secrets. Returns "invalid-url" if unparseable.
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "invalid-url"
+	}
+	return u.Host
 }
 
 // post performs a single delivery attempt and returns the HTTP status code.

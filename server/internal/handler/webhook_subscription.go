@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/integrations/outwebhook"
+	"github.com/multica-ai/multica/server/internal/netguard"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -97,14 +98,14 @@ func generateWebhookSecret() (string, error) {
 	return generateCredential(webhookSecretPrefix)
 }
 
-// validateWebhookURL enforces an absolute http(s) URL and rejects endpoints
-// that point at the server's own network — loopback, link-local (incl. the
-// 169.254.169.254 cloud metadata endpoint), private, and unspecified ranges.
-// This is a best-effort SSRF guard on IP-literal hosts plus "localhost"; it
-// does not resolve DNS, so a hostname that resolves to an internal address can
-// still slip through (DNS-rebinding is out of scope for v1). Webhooks are
-// admin-created, but an admin shouldn't be able to turn the server into a probe
-// of its own metadata service or internal subnet.
+// validateWebhookURL enforces an absolute http(s) URL and fast-rejects endpoints
+// that obviously point at the server's own network — "localhost" and IP-literal
+// hosts in loopback/link-local (incl. the 169.254.169.254 cloud metadata
+// endpoint)/private/unspecified ranges. This is a create-time UX check only:
+// the authoritative SSRF guard runs at delivery time in netguard's restricted
+// HTTP client, which resolves DNS and re-checks every dial (including redirect
+// hops), closing the hostname-resolves-to-internal and DNS-rebinding gaps this
+// literal check cannot.
 func validateWebhookURL(raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -120,28 +121,19 @@ func validateWebhookURL(raw string) error {
 	if strings.EqualFold(host, "localhost") {
 		return errors.New("url must not target localhost")
 	}
-	if ip := net.ParseIP(host); ip != nil && isInternalIP(ip) {
+	if ip := net.ParseIP(host); ip != nil && netguard.IsBlockedIP(ip) {
 		return errors.New("url must not target an internal or loopback address")
 	}
 	return nil
 }
 
-// isInternalIP reports whether ip is in a range that should never be reachable
-// from a user-configured outbound webhook.
-func isInternalIP(ip net.IP) bool {
-	return ip.IsLoopback() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsPrivate() ||
-		ip.IsUnspecified()
-}
-
 // validateWebhookEvents checks every requested event against the allow-list and
-// returns the JSONB bytes to persist. An empty request defaults to the single
-// supported event.
+// returns the JSONB bytes to persist. An empty list is rejected — callers that
+// want the default must apply it before calling (create does; update does not,
+// so an explicit empty array is a 400 rather than a silent reset to default).
 func validateWebhookEvents(events []string) ([]byte, error) {
 	if len(events) == 0 {
-		events = []string{outwebhook.EventIssueStatusChanged}
+		return nil, errors.New("events must not be empty")
 	}
 	for _, e := range events {
 		if !supportedWebhookEvents[e] {
@@ -220,9 +212,22 @@ func (h *Handler) CreateWebhookSubscription(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+
+	// Authorize before validating input so an unauthorized caller can't probe
+	// validation behavior (URL/event fingerprinting).
+	workspaceID := h.resolveWorkspaceID(r)
+	if _, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin"); !ok {
+		return
+	}
+
 	if err := validateWebhookURL(req.URL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// Default the event list on create only; validateWebhookEvents rejects an
+	// empty list so an explicit empty array on update is a 400, not a reset.
+	if len(req.Events) == 0 {
+		req.Events = []string{outwebhook.EventIssueStatusChanged}
 	}
 	eventsJSON, err := validateWebhookEvents(req.Events)
 	if err != nil {
@@ -230,10 +235,6 @@ func (h *Handler) CreateWebhookSubscription(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	workspaceID := h.resolveWorkspaceID(r)
-	if _, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin"); !ok {
-		return
-	}
 	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace id")
 	if !ok {
 		return

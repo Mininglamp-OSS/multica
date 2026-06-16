@@ -1,7 +1,11 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/integrations/outwebhook"
@@ -43,22 +47,25 @@ func TestValidateWebhookURL(t *testing.T) {
 }
 
 func TestValidateWebhookEvents(t *testing.T) {
-	// Empty defaults to the single supported event.
-	b, err := validateWebhookEvents(nil)
+	// Empty is rejected (the default is applied by the create handler, not here).
+	if _, err := validateWebhookEvents(nil); err == nil {
+		t.Error("empty events should be rejected")
+	}
+	if _, err := validateWebhookEvents([]string{}); err == nil {
+		t.Error("explicit empty events should be rejected")
+	}
+
+	// Known event passes and round-trips.
+	b, err := validateWebhookEvents([]string{outwebhook.EventIssueStatusChanged})
 	if err != nil {
-		t.Fatalf("validateWebhookEvents(nil) error: %v", err)
+		t.Fatalf("known event rejected: %v", err)
 	}
 	var got []string
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(got) != 1 || got[0] != outwebhook.EventIssueStatusChanged {
-		t.Errorf("default events = %v, want [%s]", got, outwebhook.EventIssueStatusChanged)
-	}
-
-	// Known event passes.
-	if _, err := validateWebhookEvents([]string{outwebhook.EventIssueStatusChanged}); err != nil {
-		t.Errorf("known event rejected: %v", err)
+		t.Errorf("events = %v, want [%s]", got, outwebhook.EventIssueStatusChanged)
 	}
 
 	// Unknown event is rejected.
@@ -90,5 +97,120 @@ func TestSecretHint(t *testing.T) {
 	}
 	if got := secretHint("ab"); got != "" {
 		t.Errorf("secretHint(short) = %q, want empty", got)
+	}
+}
+
+// ── DB-backed CRUD / RBAC behavior (skipped when no test DB) ────────────────
+
+func setWebhookTestMemberRole(t *testing.T, role string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE member SET role=$1 WHERE workspace_id=$2 AND user_id=$3`,
+		role, testWorkspaceID, testUserID); err != nil {
+		t.Fatalf("set member role %q: %v", role, err)
+	}
+}
+
+func cleanupWebhookSubscriptions(t *testing.T) {
+	t.Helper()
+	testPool.Exec(context.Background(),
+		`DELETE FROM webhook_subscription WHERE workspace_id=$1`, testWorkspaceID)
+}
+
+func createWebhookForTest(t *testing.T, body map[string]any) WebhookSubscriptionResponse {
+	t.Helper()
+	req := newRequest("POST", "/api/webhook-subscriptions", body)
+	w := httptest.NewRecorder()
+	testHandler.CreateWebhookSubscription(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var created WebhookSubscriptionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	return created
+}
+
+func TestCreateWebhookSubscription_RequiresAdmin(t *testing.T) {
+	setWebhookTestMemberRole(t, "member")
+	t.Cleanup(func() { setWebhookTestMemberRole(t, "owner") })
+	t.Cleanup(func() { cleanupWebhookSubscriptions(t) })
+
+	req := newRequest("POST", "/api/webhook-subscriptions", map[string]any{"url": "https://example.com/hook"})
+	w := httptest.NewRecorder()
+	testHandler.CreateWebhookSubscription(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("member role should be forbidden, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateWebhookSubscription_SecretShownOnce(t *testing.T) {
+	t.Cleanup(func() { cleanupWebhookSubscriptions(t) })
+
+	created := createWebhookForTest(t, map[string]any{"url": "https://example.com/hook"})
+	if !strings.HasPrefix(created.SecretOnce, webhookSecretPrefix) {
+		t.Errorf("create must return the full secret once, got %q", created.SecretOnce)
+	}
+	if created.SecretHint == "" {
+		t.Errorf("create must return secret_hint")
+	}
+
+	lreq := newRequest("GET", "/api/webhook-subscriptions", nil)
+	lw := httptest.NewRecorder()
+	testHandler.ListWebhookSubscriptions(lw, lreq)
+	if lw.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", lw.Code, lw.Body.String())
+	}
+	var listResp struct {
+		Subscriptions []WebhookSubscriptionResponse `json:"subscriptions"`
+	}
+	if err := json.Unmarshal(lw.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	var found bool
+	for _, s := range listResp.Subscriptions {
+		if s.ID != created.ID {
+			continue
+		}
+		found = true
+		if s.SecretOnce != "" {
+			t.Errorf("list must not echo the secret, got %q", s.SecretOnce)
+		}
+		if s.SecretHint == "" {
+			t.Errorf("list should expose secret_hint")
+		}
+	}
+	if !found {
+		t.Errorf("created subscription %s missing from list", created.ID)
+	}
+}
+
+func TestCreateWebhookSubscription_ProjectMustBeInWorkspace(t *testing.T) {
+	t.Cleanup(func() { cleanupWebhookSubscriptions(t) })
+
+	foreignProject := "11111111-1111-1111-1111-111111111111"
+	req := newRequest("POST", "/api/webhook-subscriptions", map[string]any{
+		"url":        "https://example.com/hook",
+		"project_id": foreignProject,
+	})
+	w := httptest.NewRecorder()
+	testHandler.CreateWebhookSubscription(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("foreign project should be 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateWebhookSubscription_RejectsEmptyEvents(t *testing.T) {
+	t.Cleanup(func() { cleanupWebhookSubscriptions(t) })
+
+	created := createWebhookForTest(t, map[string]any{"url": "https://example.com/hook"})
+
+	ureq := newRequest("PATCH", "/api/webhook-subscriptions/"+created.ID, map[string]any{"events": []string{}})
+	ureq = withURLParam(ureq, "id", created.ID)
+	uw := httptest.NewRecorder()
+	testHandler.UpdateWebhookSubscription(uw, ureq)
+	if uw.Code != http.StatusBadRequest {
+		t.Fatalf("explicit empty events should be 400, got %d: %s", uw.Code, uw.Body.String())
 	}
 }

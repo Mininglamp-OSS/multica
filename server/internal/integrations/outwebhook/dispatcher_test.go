@@ -140,7 +140,7 @@ func TestDispatchDeliversToMatchingSubscriptions(t *testing.T) {
 		sub(t, projA, projA, []string{EventIssueStatusChanged}, srv.URL),
 		sub(t, projB, projB, []string{EventIssueStatusChanged}, srv.URL),
 	}}
-	d := New(store)
+	d := newWithClient(store, &http.Client{Timeout: deliveryTimeout})
 
 	c.wg.Add(2) // expect exactly 2 successful deliveries
 	d.DispatchIssueStatusChanged(IssueStatusChanged{
@@ -201,7 +201,7 @@ func TestDispatchSkipsUnsubscribedEvent(t *testing.T) {
 	store := &fakeStore{subs: []db.WebhookSubscription{
 		sub(t, subID1, "", []string{"issue.created"}, srv.URL),
 	}}
-	d := New(store)
+	d := newWithClient(store, &http.Client{Timeout: deliveryTimeout})
 	d.DispatchIssueStatusChanged(IssueStatusChanged{
 		WorkspaceID: wsID,
 		Issue:       map[string]any{"id": "issue-1"},
@@ -213,6 +213,32 @@ func TestDispatchSkipsUnsubscribedEvent(t *testing.T) {
 	defer c.mu.Unlock()
 	if len(c.bodies) != 0 {
 		t.Fatalf("expected 0 deliveries for unsubscribed event, got %d", len(c.bodies))
+	}
+}
+
+// TestProductionClientBlocksInternalDelivery proves the default constructor
+// wires the SSRF-restricted client: a delivery to a loopback endpoint (what
+// httptest binds) must be refused at dial time, so the catcher records nothing.
+func TestProductionClientBlocksInternalDelivery(t *testing.T) {
+	c := &collector{}
+	srv := httptest.NewServer(http.HandlerFunc(c.handler))
+	defer srv.Close()
+
+	store := &fakeStore{subs: []db.WebhookSubscription{
+		sub(t, subID1, "", []string{EventIssueStatusChanged}, srv.URL),
+	}}
+	d := New(store) // real restricted client
+	d.DispatchIssueStatusChanged(IssueStatusChanged{
+		WorkspaceID: wsID,
+		Issue:       map[string]any{"id": "issue-1"},
+	})
+
+	// Allow the (doomed) attempts to run; they fail fast at dial.
+	time.Sleep(300 * time.Millisecond)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.bodies) != 0 {
+		t.Fatalf("SSRF guard should have blocked loopback delivery, got %d deliveries", len(c.bodies))
 	}
 }
 
@@ -230,7 +256,7 @@ func TestDeliverRetriesOn5xx(t *testing.T) {
 	store := &fakeStore{subs: []db.WebhookSubscription{
 		sub(t, subID1, "", []string{EventIssueStatusChanged}, srv.URL),
 	}}
-	d := New(store)
+	d := newWithClient(store, &http.Client{Timeout: deliveryTimeout})
 
 	c.wg.Add(1) // one eventual success
 	d.DispatchIssueStatusChanged(IssueStatusChanged{
