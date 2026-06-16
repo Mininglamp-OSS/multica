@@ -2916,6 +2916,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			"assignee_changed": assigneeChanged,
 			"status_changed":   statusChanged,
 			"priority_changed": priorityChanged,
+			"prev_status":      prevIssue.Status,
 		})
 
 		if assigneeChanged {
