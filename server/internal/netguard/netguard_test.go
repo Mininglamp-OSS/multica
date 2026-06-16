@@ -21,6 +21,14 @@ func TestIsBlockedIP(t *testing.T) {
 		"fc00::1",         // unique-local v6 (IsPrivate)
 		"0.0.0.0",         // unspecified
 		"::",              // unspecified v6
+		"100.64.0.1",      // shared address space (RFC 6598)
+		"100.100.100.200", // cloud metadata in some envs (within 100.64/10)
+		"198.18.0.1",      // benchmarking (RFC 2544)
+		"192.0.0.1",       // IETF protocol assignments
+		"240.0.0.1",       // reserved for future use
+		"255.255.255.255", // limited broadcast (within 240/4)
+		"224.0.0.1",       // multicast
+		"ff02::1",         // multicast v6
 	}
 	for _, s := range blocked {
 		if ip := net.ParseIP(s); ip == nil || !IsBlockedIP(ip) {
@@ -31,7 +39,8 @@ func TestIsBlockedIP(t *testing.T) {
 	allowed := []string{
 		"8.8.8.8",
 		"1.1.1.1",
-		"203.0.113.10",
+		"9.9.9.9",
+		"140.82.121.4", // github.com
 		"2606:4700:4700::1111",
 	}
 	for _, s := range allowed {

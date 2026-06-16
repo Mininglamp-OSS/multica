@@ -14,15 +14,51 @@ import (
 	"time"
 )
 
+// blockedCIDRs are IANA special-purpose ranges that Go's net.IP predicates
+// (IsLoopback/IsLinkLocal*/IsPrivate/IsUnspecified/IsMulticast) do NOT cover but
+// which an outbound webhook must never reach — most importantly shared address
+// space, which hosts cloud metadata endpoints in some environments
+// (e.g. 100.100.100.200 on Alibaba Cloud).
+var blockedCIDRs = mustParseCIDRs(
+	"100.64.0.0/10", // shared address space / CGNAT (RFC 6598); incl. 100.100.100.200 metadata
+	"192.0.0.0/24",  // IETF protocol assignments (RFC 6890)
+	"198.18.0.0/15", // benchmarking (RFC 2544)
+	"240.0.0.0/4",   // reserved for future use + 255.255.255.255 broadcast (RFC 1112)
+	"2001:db8::/32", // documentation (RFC 3849)
+)
+
+func mustParseCIDRs(cidrs ...string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("netguard: invalid CIDR " + c + ": " + err.Error())
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
 // IsBlockedIP reports whether ip is an address an outbound request to a
 // user-supplied URL must never reach: loopback, link-local (covers the
-// 169.254.169.254 cloud-metadata endpoint), private, and unspecified ranges.
+// 169.254.169.254 cloud-metadata endpoint), private, unspecified, multicast,
+// and the IANA special-purpose ranges in blockedCIDRs (incl. 100.64.0.0/10
+// shared space, which carries metadata endpoints in some clouds).
 func IsBlockedIP(ip net.IP) bool {
-	return ip.IsLoopback() ||
+	if ip.IsLoopback() ||
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
 		ip.IsPrivate() ||
-		ip.IsUnspecified()
+		ip.IsUnspecified() ||
+		ip.IsMulticast() {
+		return true
+	}
+	for _, n := range blockedCIDRs {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewRestrictedHTTPClient returns an http.Client whose transport rejects any
