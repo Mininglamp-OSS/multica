@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,10 +67,11 @@ const (
 	eventQueueCapacity = 1024
 )
 
-// retryBackoff is the wait before attempt N+1 (index 0 = wait before the first
-// retry). Short and fixed — fire-and-forget delivery shouldn't hold a goroutine
-// for long.
-var retryBackoff = []time.Duration{1 * time.Second, 4 * time.Second}
+// defaultRetryBackoff is the wait before attempt N+1 (index 0 = wait before the
+// first retry). Short and fixed — fire-and-forget delivery shouldn't hold a
+// worker for long. Copied into each Dispatcher so tests can override per
+// instance without mutating shared state (which would race the worker pools).
+var defaultRetryBackoff = []time.Duration{1 * time.Second, 4 * time.Second}
 
 // Store is the subset of *db.Queries the dispatcher needs. An interface keeps
 // the selection/filtering/signing logic testable without a database.
@@ -87,10 +89,23 @@ type deliverJob struct {
 // Dispatcher fans an event out to matching subscriptions via bounded worker
 // pools — one stage for the per-event subscription lookup, one for delivery.
 type Dispatcher struct {
-	store  Store
-	client *http.Client
-	events chan IssueStatusChanged
-	jobs   chan deliverJob
+	store        Store
+	client       *http.Client
+	events       chan IssueStatusChanged
+	jobs         chan deliverJob
+	retryBackoff []time.Duration
+
+	// Lifecycle. stopDispatch is closed first (stop accepting events + drain the
+	// dispatch stage); stopDeliver is closed after the dispatch stage has fully
+	// drained into jobs, so no delivery is lost mid-shutdown. The channels are
+	// never closed, so concurrent sends in DispatchIssueStatusChanged / dispatch
+	// can never panic.
+	stopDispatch chan struct{}
+	stopDeliver  chan struct{}
+	dispatchWG   sync.WaitGroup
+	deliverWG    sync.WaitGroup
+	closeOnce    sync.Once
+	closeDone    chan struct{}
 }
 
 // New builds a Dispatcher and starts its worker pools. The HTTP client is
@@ -105,34 +120,89 @@ func New(store Store) *Dispatcher {
 // SSRF guard itself is covered by the netguard package tests).
 func newWithClient(store Store, client *http.Client) *Dispatcher {
 	d := &Dispatcher{
-		store:  store,
-		client: client,
-		events: make(chan IssueStatusChanged, eventQueueCapacity),
-		jobs:   make(chan deliverJob, queueCapacity),
+		store:        store,
+		client:       client,
+		events:       make(chan IssueStatusChanged, eventQueueCapacity),
+		jobs:         make(chan deliverJob, queueCapacity),
+		retryBackoff: defaultRetryBackoff,
+		stopDispatch: make(chan struct{}),
+		stopDeliver:  make(chan struct{}),
 	}
+	d.dispatchWG.Add(numDispatchWorkers)
 	for i := 0; i < numDispatchWorkers; i++ {
 		go d.dispatchWorker()
 	}
+	d.deliverWG.Add(numWorkers)
 	for i := 0; i < numWorkers; i++ {
 		go d.worker()
 	}
 	return d
 }
 
+// Close stops accepting new events and drains in-flight work: dispatch workers
+// finish enqueuing their deliveries, then delivery workers drain the queue.
+// Blocks until drained or ctx expires. Safe to call more than once.
+func (d *Dispatcher) Close(ctx context.Context) error {
+	d.closeOnce.Do(func() {
+		d.closeDone = make(chan struct{})
+		close(d.stopDispatch)
+		go func() {
+			d.dispatchWG.Wait() // dispatch stage drained → all jobs enqueued
+			close(d.stopDeliver)
+			d.deliverWG.Wait() // delivery stage drained
+			close(d.closeDone)
+		}()
+	})
+	select {
+	case <-d.closeDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // dispatchWorker drains the event queue, running the subscription lookup +
 // filter + marshal for each event. Bounded to numDispatchWorkers so concurrent
-// DB queries can't grow with event volume.
+// DB queries can't grow with event volume. On Close it drains buffered events
+// then exits.
 func (d *Dispatcher) dispatchWorker() {
-	for ev := range d.events {
-		d.dispatch(ev)
+	defer d.dispatchWG.Done()
+	for {
+		select {
+		case ev := <-d.events:
+			d.dispatch(ev)
+		case <-d.stopDispatch:
+			for {
+				select {
+				case ev := <-d.events:
+					d.dispatch(ev)
+				default:
+					return
+				}
+			}
+		}
 	}
 }
 
 // worker drains the delivery queue. A delivery panic is recovered so a single
-// bad delivery can never kill a long-lived worker.
+// bad delivery can never kill a long-lived worker. On Close it drains buffered
+// jobs then exits.
 func (d *Dispatcher) worker() {
-	for job := range d.jobs {
-		d.safeDeliver(job)
+	defer d.deliverWG.Done()
+	for {
+		select {
+		case job := <-d.jobs:
+			d.safeDeliver(job)
+		case <-d.stopDeliver:
+			for {
+				select {
+				case job := <-d.jobs:
+					d.safeDeliver(job)
+				default:
+					return
+				}
+			}
+		}
 	}
 }
 
@@ -182,8 +252,16 @@ type outboundPayload struct {
 // non-blocking: a full queue drops the event (fire-and-forget v1) rather than
 // blocking the bus.
 func (d *Dispatcher) DispatchIssueStatusChanged(ev IssueStatusChanged) {
+	// Stop accepting once shutdown has begun (never send on a closed channel —
+	// the queues are never closed, so this gate is the only stop signal).
+	select {
+	case <-d.stopDispatch:
+		return
+	default:
+	}
 	select {
 	case d.events <- ev:
+	case <-d.stopDispatch:
 	default:
 		slog.Warn("outwebhook: event queue full, dropping", "workspace_id", ev.WorkspaceID)
 	}
@@ -252,7 +330,7 @@ func (d *Dispatcher) deliver(sub db.WebhookSubscription, event string, body []by
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
-			time.Sleep(retryBackoff[attempt-1])
+			time.Sleep(d.retryBackoff[attempt-1])
 		}
 
 		status, err := d.post(sub.Url, event, deliveryID, signature, body)

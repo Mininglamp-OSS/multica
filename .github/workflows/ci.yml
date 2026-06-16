@@ -100,6 +100,12 @@ jobs:
       - name: Test
         run: cd server && go test ./...
 
+      # The outbound-webhook dispatcher runs worker-pool goroutines; run its
+      # packages under the race detector so concurrency regressions are caught
+      # (the full suite isn't run with -race to keep CI fast).
+      - name: Test (race) — webhook delivery
+        run: cd server && go test -race ./internal/integrations/outwebhook/... ./internal/netguard/...
+
   installer:
     # Stub-driven shell tests for scripts/install.sh. Kept off the heavy
     # backend job so installer regressions surface independently, and

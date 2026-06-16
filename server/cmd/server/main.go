@@ -258,7 +258,8 @@ func main() {
 	registerSubscriberListeners(bus, queries)
 	registerActivityListeners(bus, queries)
 	registerNotificationListeners(bus, queries)
-	registerWebhookListeners(bus, outwebhook.New(queries))
+	webhookDispatcher := outwebhook.New(queries)
+	registerWebhookListeners(bus, webhookDispatcher)
 
 	metricsConfig := obsmetrics.ConfigFromEnv()
 	var metricsServer *http.Server
@@ -442,6 +443,14 @@ func main() {
 		os.Exit(1)
 	}
 	apiShutdownCancel()
+
+	// HTTP is fully drained — no new issue:updated events will be produced, so
+	// drain any in-flight outbound webhook deliveries before exiting.
+	webhookShutdownCtx, webhookShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := webhookDispatcher.Close(webhookShutdownCtx); err != nil {
+		slog.Warn("outbound webhook dispatcher shutdown timed out", "error", err)
+	}
+	webhookShutdownCancel()
 
 	// HTTP is fully drained — safe to stop the sweeper and flush the
 	// final batch of queued heartbeat bumps.

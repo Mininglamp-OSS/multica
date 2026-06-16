@@ -30,6 +30,20 @@ func (f *fakeStore) ListEnabledWebhookSubscriptionsForDispatch(_ context.Context
 	return f.subs, f.err
 }
 
+// newTestDispatcher builds a dispatcher with a fast retry backoff and registers
+// Close on cleanup so worker goroutines never leak across tests.
+func newTestDispatcher(t *testing.T, store Store, client *http.Client) *Dispatcher {
+	t.Helper()
+	d := newWithClient(store, client)
+	d.retryBackoff = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = d.Close(ctx)
+	})
+	return d
+}
+
 func mustUUID(t *testing.T, s string) pgtype.UUID {
 	t.Helper()
 	u, err := util.ParseUUID(s)
@@ -142,7 +156,7 @@ func TestDispatchDeliversToMatchingSubscriptions(t *testing.T) {
 		sub(t, projA, projA, []string{EventIssueStatusChanged}, srv.URL),
 		sub(t, projB, projB, []string{EventIssueStatusChanged}, srv.URL),
 	}}
-	d := newWithClient(store, &http.Client{Timeout: deliveryTimeout})
+	d := newTestDispatcher(t, store, &http.Client{Timeout: deliveryTimeout})
 
 	c.wg.Add(2) // expect exactly 2 successful deliveries
 	d.DispatchIssueStatusChanged(IssueStatusChanged{
@@ -203,7 +217,7 @@ func TestDispatchSkipsUnsubscribedEvent(t *testing.T) {
 	store := &fakeStore{subs: []db.WebhookSubscription{
 		sub(t, subID1, "", []string{"issue.created"}, srv.URL),
 	}}
-	d := newWithClient(store, &http.Client{Timeout: deliveryTimeout})
+	d := newTestDispatcher(t, store, &http.Client{Timeout: deliveryTimeout})
 	d.DispatchIssueStatusChanged(IssueStatusChanged{
 		WorkspaceID: wsID,
 		Issue:       map[string]any{"id": "issue-1"},
@@ -229,7 +243,15 @@ func TestProductionClientBlocksInternalDelivery(t *testing.T) {
 	store := &fakeStore{subs: []db.WebhookSubscription{
 		sub(t, subID1, "", []string{EventIssueStatusChanged}, srv.URL),
 	}}
-	d := New(store) // real restricted client
+	// Use the production constructor to prove New() wires the SSRF-restricted
+	// client. Short backoff + Close-on-cleanup keep it fast and leak-free.
+	d := New(store)
+	d.retryBackoff = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = d.Close(ctx)
+	})
 	d.DispatchIssueStatusChanged(IssueStatusChanged{
 		WorkspaceID: wsID,
 		Issue:       map[string]any{"id": "issue-1"},
@@ -250,15 +272,12 @@ func TestDeliverRetriesOn5xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(c.handler))
 	defer srv.Close()
 
-	// Shorten backoff so the test is fast.
-	orig := retryBackoff
-	retryBackoff = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
-	defer func() { retryBackoff = orig }()
-
 	store := &fakeStore{subs: []db.WebhookSubscription{
 		sub(t, subID1, "", []string{EventIssueStatusChanged}, srv.URL),
 	}}
-	d := newWithClient(store, &http.Client{Timeout: deliveryTimeout})
+	d := newTestDispatcher(t, store, &http.Client{Timeout: deliveryTimeout})
+	// Shorten backoff so the test is fast (per-instance — no shared global).
+	d.retryBackoff = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
 
 	c.wg.Add(1) // one eventual success
 	d.DispatchIssueStatusChanged(IssueStatusChanged{
@@ -338,14 +357,11 @@ func TestDeliverRetriesOn429(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	orig := retryBackoff
-	retryBackoff = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
-	defer func() { retryBackoff = orig }()
-
 	store := &fakeStore{subs: []db.WebhookSubscription{
 		sub(t, subID1, "", []string{EventIssueStatusChanged}, srv.URL),
 	}}
-	d := newWithClient(store, &http.Client{Timeout: deliveryTimeout})
+	d := newTestDispatcher(t, store, &http.Client{Timeout: deliveryTimeout})
+	d.retryBackoff = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
 	c.wg.Add(1)
 	d.DispatchIssueStatusChanged(IssueStatusChanged{WorkspaceID: wsID, Issue: map[string]any{"id": "i"}})
 
@@ -354,5 +370,49 @@ func TestDeliverRetriesOn429(t *testing.T) {
 	defer c.mu.Unlock()
 	if len(c.bodies) != 2 {
 		t.Fatalf("429 should be retried: expected 2 attempts, got %d", len(c.bodies))
+	}
+}
+
+func TestClose_DrainsInFlightAndStopsAccepting(t *testing.T) {
+	c := &collector{wg: &sync.WaitGroup{}}
+	srv := httptest.NewServer(http.HandlerFunc(c.handler))
+	defer srv.Close()
+
+	store := &fakeStore{subs: []db.WebhookSubscription{
+		sub(t, subID1, "", []string{EventIssueStatusChanged}, srv.URL),
+	}}
+	d := newTestDispatcher(t, store, &http.Client{Timeout: deliveryTimeout})
+
+	c.wg.Add(1)
+	d.DispatchIssueStatusChanged(IssueStatusChanged{WorkspaceID: wsID, Issue: map[string]any{"id": "i"}})
+
+	// Close drains the in-flight delivery before returning.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := d.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	waitTimeout(t, c.wg, time.Second) // delivery already happened during drain
+
+	c.mu.Lock()
+	delivered := len(c.bodies)
+	c.mu.Unlock()
+	if delivered != 1 {
+		t.Fatalf("expected 1 delivery drained on close, got %d", delivered)
+	}
+
+	// After Close, new events are dropped (no panic, no delivery).
+	d.DispatchIssueStatusChanged(IssueStatusChanged{WorkspaceID: wsID, Issue: map[string]any{"id": "j"}})
+	time.Sleep(100 * time.Millisecond)
+	c.mu.Lock()
+	after := len(c.bodies)
+	c.mu.Unlock()
+	if after != 1 {
+		t.Fatalf("post-close dispatch should be dropped, got %d deliveries", after)
+	}
+
+	// Idempotent.
+	if err := d.Close(ctx); err != nil {
+		t.Fatalf("second Close: %v", err)
 	}
 }

@@ -17,6 +17,17 @@ import (
 // status_changed and reads the typed handler.IssueResponse out of the payload.
 // Delivery itself is async (the dispatcher detaches each POST), so this listener
 // never blocks the synchronous bus dispatch.
+//
+// Scope of issue.status_changed (v1): it fires for the user/API/PR-merge status
+// transitions that publish issue:updated with status_changed=true — single
+// update, batch update, and the GitHub PR-merged path. It does NOT fire for
+// system-internal status mutations that bypass that event, e.g. the agent
+// task-failure reset and the stuck-issue sweeper (in_progress → todo), which
+// write status directly via UpdateIssueStatus and publish only task events.
+// This matches how the existing inbound autopilot webhooks consume the same
+// event; widening the producer to emit status_changed on every internal path is
+// out of scope for this feature. Subscribers should treat the event as
+// "user/API-initiated status change", not "every possible status mutation".
 func registerWebhookListeners(bus *events.Bus, d *outwebhook.Dispatcher) {
 	bus.Subscribe(protocol.EventIssueUpdated, func(e events.Event) {
 		payload, ok := e.Payload.(map[string]any)
