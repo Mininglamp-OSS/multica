@@ -162,7 +162,7 @@ func (h *Handler) triggerToResponse(t db.AutopilotTrigger) AutopilotTriggerRespo
 		resp.Provider = &provider
 		if t.SigningSecret.Valid && t.SigningSecret.String != "" {
 			resp.HasSigningSecret = true
-			hint := signingSecretHint(t.SigningSecret.String)
+			hint := secretHint(t.SigningSecret.String)
 			resp.SigningSecretHint = &hint
 		}
 		if len(t.EventFilters) > 0 {
@@ -177,17 +177,6 @@ func (h *Handler) triggerToResponse(t db.AutopilotTrigger) AutopilotTriggerRespo
 		}
 	}
 	return resp
-}
-
-// signingSecretHint returns the last 4 characters of the signing secret so a
-// configured-vs-rotated state is visible in the UI without exposing the
-// secret itself. Truncating below 4 chars (which the validator already
-// rejects) just returns an empty string.
-func signingSecretHint(secret string) string {
-	if len(secret) < 4 {
-		return ""
-	}
-	return secret[len(secret)-4:]
 }
 
 // webhookPathForToken composes the path used by the public ingress route.

@@ -14,6 +14,23 @@ export interface ParseOptions {
   /** Endpoint identifier used in the warning log so we can grep for which
    *  contract drifted in production telemetry. */
   endpoint: string;
+  /** Top-level keys to redact from the logged `received` body on validation
+   *  failure. Use for secret-bearing responses (e.g. a one-time signing
+   *  secret) so a future shape drift can't write a live credential to logs. */
+  redact?: string[];
+}
+
+// redactReceived returns a shallow copy of an object body with the named keys
+// replaced by "[redacted]". Non-object bodies are returned unchanged.
+function redactReceived(data: unknown, keys: string[]): unknown {
+  if (keys.length === 0 || data === null || typeof data !== "object" || Array.isArray(data)) {
+    return data;
+  }
+  const copy: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+  for (const k of keys) {
+    if (k in copy) copy[k] = "[redacted]";
+  }
+  return copy;
 }
 
 /**
@@ -48,7 +65,7 @@ export function parseWithFallback<T>(
     {
       endpoint: opts.endpoint,
       issues: result.error.issues,
-      received: data,
+      received: redactReceived(data, opts.redact ?? []),
     },
   );
   return fallback;

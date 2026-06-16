@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { ApiClient } from "./client";
-import { parseWithFallback } from "./schema";
+import { parseWithFallback, setSchemaLogger } from "./schema";
 
 // Helper: stub fetch with a single JSON response. Status defaults to 200.
 function stubFetchJson(body: unknown, status = 200) {
@@ -342,5 +342,36 @@ describe("parseWithFallback", () => {
     const fallback = { id: "fallback" };
     const out = parseWithFallback(null, schema, fallback, opts);
     expect(out).toBe(fallback);
+  });
+
+  it("redacts named keys from the logged body on validation failure", () => {
+    const logged: unknown[] = [];
+    setSchemaLogger({
+      debug: () => {},
+      info: () => {},
+      warn: (_msg: string, ...data: unknown[]) => logged.push(...data),
+      error: () => {},
+    });
+    try {
+      const schema = z.object({ id: z.string() });
+      // `secret` present but `id` wrong type → validation fails → logs body.
+      parseWithFallback(
+        { id: 123, secret: "whsec_live_credential" },
+        schema,
+        { id: "fallback" },
+        { endpoint: "POST /unit", redact: ["secret"] },
+      );
+    } finally {
+      setSchemaLogger({
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+      });
+    }
+    const entry = logged[0] as { received?: Record<string, unknown> };
+    expect(entry.received?.secret).toBe("[redacted]");
+    // non-redacted fields are preserved for debugging
+    expect(entry.received?.id).toBe(123);
   });
 });

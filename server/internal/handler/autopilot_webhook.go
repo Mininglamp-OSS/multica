@@ -2,11 +2,8 @@ package handler
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/webhooksign"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -37,17 +35,25 @@ const maxWebhookBodyBytes = 256 * 1024
 // chars. URL-safe base64 keeps the token URL-friendly without escaping.
 const webhookTokenPrefix = "awt_"
 
+// generateCredential returns prefix + URL-safe base64(32 random bytes, no
+// padding) — 256 bits of entropy. Shared by webhook bearer tokens and outbound
+// signing secrets so a future change to the entropy source or encoding applies
+// to both in one place.
+func generateCredential(prefix string) (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("rand: %w", err)
+	}
+	return prefix + base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // generateWebhookToken returns a cryptographically random bearer token used as
 // the public webhook URL secret. Format: "awt_" + URL-safe base64(32 bytes,
 // no padding). UUIDs are intentionally not used here — they are lower entropy
 // (122 bits vs 256) and visually overlap with internal IDs, which made
 // accidental token-vs-ID confusion easy in early prototypes.
 func generateWebhookToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("rand: %w", err)
-	}
-	return webhookTokenPrefix + base64.RawURLEncoding.EncodeToString(b), nil
+	return generateCredential(webhookTokenPrefix)
 }
 
 // signature_status values mirror the CHECK constraint on webhook_delivery.
@@ -257,20 +263,11 @@ func verifyWebhookSignatureForProvider(provider, secret string, headers http.Hea
 }
 
 // verifyHubSignature implements the GitHub-compatible HMAC-SHA256 scheme:
-// `X-Hub-Signature-256: sha256=<hex(hmac(body, secret))>`. The hmac.Equal
-// comparison is constant-time so partial-prefix attacks cannot leak timing.
+// `X-Hub-Signature-256: sha256=<hex(hmac(body, secret))>`. The comparison is
+// constant-time. The implementation lives in the shared webhooksign package so
+// inbound verification and outbound signing cannot drift apart.
 func verifyHubSignature(secret, header string, body []byte) bool {
-	const prefix = "sha256="
-	if !strings.HasPrefix(header, prefix) {
-		return false
-	}
-	want, err := hex.DecodeString(strings.TrimPrefix(header, prefix))
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	return hmac.Equal(mac.Sum(nil), want)
+	return webhooksign.Verify(secret, header, body)
 }
 
 // selectedHeadersJSON returns the small, debugging-friendly subset of request

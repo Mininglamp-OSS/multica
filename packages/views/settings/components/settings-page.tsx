@@ -11,6 +11,7 @@ import {
   FlaskConical,
   Bell,
   Plug,
+  Webhook,
 } from "lucide-react";
 import { GitHubMark } from "./github-mark";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@multica/ui/components/ui/tabs";
@@ -26,6 +27,7 @@ import { GitHubTab } from "./github-tab";
 import { IntegrationsTab } from "./integrations-tab";
 import { LabsTab } from "./labs-tab";
 import { NotificationsTab } from "./notifications-tab";
+import { WebhooksSection } from "./webhooks-section";
 import { useT } from "../../i18n";
 
 const ACCOUNT_TAB_KEYS = ["profile", "preferences", "notifications", "tokens"] as const;
@@ -41,6 +43,7 @@ const WORKSPACE_TAB_KEYS = [
   "repositories",
   "github",
   "integrations",
+  "webhooks",
   "labs",
   "members",
 ] as const;
@@ -49,6 +52,7 @@ const WORKSPACE_TAB_VALUES = {
   repositories: "repositories",
   github: "github",
   integrations: "integrations",
+  webhooks: "webhooks",
   labs: "labs",
   members: "members",
 } as const;
@@ -57,6 +61,7 @@ const WORKSPACE_TAB_ICONS = {
   repositories: FolderGit2,
   github: GitHubMark,
   integrations: Plug,
+  webhooks: Webhook,
   labs: FlaskConical,
   members: Users,
 } as const;
@@ -175,6 +180,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
           <TabsContent value="repositories"><RepositoriesTab /></TabsContent>
           <TabsContent value="github"><GitHubTab /></TabsContent>
           <TabsContent value="integrations"><IntegrationsTab /></TabsContent>
+          <TabsContent value="webhooks"><WebhooksSection /></TabsContent>
           <TabsContent value="labs"><LabsTab /></TabsContent>
           <TabsContent value="members"><MembersTab /></TabsContent>
           {extraAccountTabs?.map((tab) => (

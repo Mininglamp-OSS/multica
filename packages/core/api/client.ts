@@ -97,6 +97,10 @@ import type {
   ListAutopilotRunsResponse,
   ListWebhookDeliveriesResponse,
   WebhookDelivery,
+  WebhookSubscription,
+  CreateWebhookSubscriptionRequest,
+  UpdateWebhookSubscriptionRequest,
+  ListWebhookSubscriptionsResponse,
   NotificationPreferenceResponse,
   NotificationPreferences,
   GitHubPullRequest,
@@ -179,6 +183,10 @@ import {
   TimelineEntriesSchema,
   UserSchema,
   WebhookDeliveryResponseSchema,
+  WebhookSubscriptionResponseSchema,
+  ListWebhookSubscriptionsResponseSchema,
+  EMPTY_LIST_WEBHOOK_SUBSCRIPTIONS_RESPONSE,
+  EMPTY_WEBHOOK_SUBSCRIPTION,
   BillingBalanceSchema,
   BillingTransactionsPageSchema,
   BillingBatchesPageSchema,
@@ -2078,6 +2086,61 @@ export class ApiClient {
       { ...EMPTY_WEBHOOK_DELIVERY, autopilot_id: autopilotId },
       { endpoint: "POST /api/autopilots/:id/deliveries/:deliveryId/replay" },
     );
+  }
+
+  // Outbound webhook subscriptions (workspace + project level).
+  async listWebhookSubscriptions(
+    projectId?: string,
+  ): Promise<ListWebhookSubscriptionsResponse> {
+    const search = new URLSearchParams();
+    if (projectId) search.set("project_id", projectId);
+    const qs = search.toString();
+    const raw = await this.fetch<unknown>(
+      `/api/webhook-subscriptions${qs ? `?${qs}` : ""}`,
+    );
+    return parseWithFallback(
+      raw,
+      ListWebhookSubscriptionsResponseSchema,
+      EMPTY_LIST_WEBHOOK_SUBSCRIPTIONS_RESPONSE,
+      { endpoint: "GET /api/webhook-subscriptions" },
+    );
+  }
+
+  async createWebhookSubscription(
+    data: CreateWebhookSubscriptionRequest,
+  ): Promise<WebhookSubscription> {
+    const raw = await this.fetch<unknown>(`/api/webhook-subscriptions`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(
+      raw,
+      WebhookSubscriptionResponseSchema,
+      EMPTY_WEBHOOK_SUBSCRIPTION,
+      // redact the one-time signing secret so a schema drift can't log a live
+      // credential via parseWithFallback's `received` body.
+      { endpoint: "POST /api/webhook-subscriptions", redact: ["secret"] },
+    );
+  }
+
+  async updateWebhookSubscription(
+    id: string,
+    data: UpdateWebhookSubscriptionRequest,
+  ): Promise<WebhookSubscription> {
+    const raw = await this.fetch<unknown>(`/api/webhook-subscriptions/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(
+      raw,
+      WebhookSubscriptionResponseSchema,
+      { ...EMPTY_WEBHOOK_SUBSCRIPTION, id },
+      { endpoint: "PATCH /api/webhook-subscriptions/:id" },
+    );
+  }
+
+  async deleteWebhookSubscription(id: string): Promise<void> {
+    await this.fetch(`/api/webhook-subscriptions/${id}`, { method: "DELETE" });
   }
 
   // GitHub integration

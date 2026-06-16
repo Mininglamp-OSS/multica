@@ -880,6 +880,16 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				})
 			})
 
+			// Outbound webhook subscriptions (workspace + project level).
+			// Owner/admin-gated inside each handler. {id} is resolved through
+			// the loader and scoped by workspace_id for writes.
+			r.Route("/api/webhook-subscriptions", func(r chi.Router) {
+				r.Get("/", h.ListWebhookSubscriptions)
+				r.Post("/", h.CreateWebhookSubscription)
+				r.Patch("/{id}", h.UpdateWebhookSubscription)
+				r.Delete("/{id}", h.DeleteWebhookSubscription)
+			})
+
 			// Pins
 			r.Route("/api/pins", func(r chi.Router) {
 				r.Get("/", h.ListPins)

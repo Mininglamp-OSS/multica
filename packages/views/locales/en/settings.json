@@ -34,6 +34,7 @@
       "repositories": "Repositories",
       "github": "GitHub",
       "integrations": "Integrations",
+      "webhooks": "Webhooks",
       "labs": "Labs",
       "members": "Members"
     }
@@ -332,6 +333,32 @@
     "install_error_session_lost": "Install session expired or was lost. Scan again to start over.",
     "install_error_forbidden": "You no longer have permission to install Lark Bots in this workspace. Ask a workspace admin to continue.",
     "install_error_generic": "Install failed. Try again."
+  },
+  "webhooks": {
+    "section_header": "Webhooks",
+    "description_workspace": "Send a signed HTTP POST to an external URL whenever an issue's status changes anywhere in this workspace.",
+    "add_label": "Endpoint URL",
+    "add_button": "Add",
+    "event_hint": "Fires on issue status changes. Each request is signed with HMAC-SHA256 in the X-Multica-Signature-256 header.",
+    "empty": "No webhooks yet.",
+    "admin_only": "Only workspace owners and admins can manage webhooks.",
+    "toggle_label": "Enabled",
+    "delete_label": "Delete webhook",
+    "secret_hint": "ends in {{hint}}",
+    "secret_dialog_title": "Copy your signing secret",
+    "secret_dialog_description": "This secret is shown only once. Use it to verify the X-Multica-Signature-256 header on incoming requests. Store it somewhere safe now.",
+    "secret_dialog_done": "Done",
+    "delete_confirm_title": "Delete this webhook?",
+    "delete_confirm_description": "The endpoint will stop receiving events immediately. This cannot be undone.",
+    "delete_confirm_cancel": "Cancel",
+    "delete_confirm_action": "Delete",
+    "toast_created": "Webhook created",
+    "toast_create_failed": "Failed to create webhook",
+    "toast_update_failed": "Failed to update webhook",
+    "toast_deleted": "Webhook deleted",
+    "toast_delete_failed": "Failed to delete webhook",
+    "toast_secret_copied": "Secret copied",
+    "toast_copy_failed": "Failed to copy"
   },
   "repositories": {
     "section_title": "Repositories",

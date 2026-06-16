@@ -34,6 +34,7 @@
       "repositories": "リポジトリ",
       "github": "GitHub",
       "integrations": "連携",
+      "webhooks": "Webhook",
       "labs": "ラボ",
       "members": "メンバー"
     }
@@ -332,6 +333,32 @@
     "install_error_session_lost": "設置セッションが期限切れまたは失われました。もう一度スキャンしてやり直してください。",
     "install_error_forbidden": "このワークスペースに Lark ボットを設置する権限がなくなりました。ワークスペース管理者にお問い合わせください。",
     "install_error_generic": "設置に失敗しました。もう一度お試しください。"
+  },
+  "webhooks": {
+    "section_header": "Webhook",
+    "description_workspace": "このワークスペース内のいずれかの issue のステータスが変わるたびに、外部 URL へ署名付きの HTTP POST を送信します。",
+    "add_label": "エンドポイント URL",
+    "add_button": "追加",
+    "event_hint": "issue のステータス変更時に発火します。各リクエストは HMAC-SHA256 で署名され、X-Multica-Signature-256 ヘッダーに付与されます。",
+    "empty": "webhook はまだありません。",
+    "admin_only": "webhook を管理できるのはワークスペースのオーナーと管理者のみです。",
+    "toggle_label": "有効",
+    "delete_label": "webhook を削除",
+    "secret_hint": "末尾 {{hint}}",
+    "secret_dialog_title": "署名シークレットをコピー",
+    "secret_dialog_description": "このシークレットは一度だけ表示されます。受信リクエストの X-Multica-Signature-256 ヘッダーを検証するために使用します。今すぐ安全な場所に保管してください。",
+    "secret_dialog_done": "完了",
+    "delete_confirm_title": "この webhook を削除しますか？",
+    "delete_confirm_description": "エンドポイントは直ちにイベントの受信を停止します。この操作は元に戻せません。",
+    "delete_confirm_cancel": "キャンセル",
+    "delete_confirm_action": "削除",
+    "toast_created": "webhook を作成しました",
+    "toast_create_failed": "webhook の作成に失敗しました",
+    "toast_update_failed": "webhook の更新に失敗しました",
+    "toast_deleted": "webhook を削除しました",
+    "toast_delete_failed": "webhook の削除に失敗しました",
+    "toast_secret_copied": "シークレットをコピーしました",
+    "toast_copy_failed": "コピーに失敗しました"
   },
   "repositories": {
     "section_title": "リポジトリ",

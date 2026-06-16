@@ -142,6 +142,13 @@ export type {
   ListWebhookDeliveriesResponse,
 } from "./autopilot";
 export type {
+  WebhookSubscription,
+  WebhookSubscriptionEvent,
+  CreateWebhookSubscriptionRequest,
+  UpdateWebhookSubscriptionRequest,
+  ListWebhookSubscriptionsResponse,
+} from "./webhook-subscription";
+export type {
   Squad,
   SquadMember,
   SquadMemberType,

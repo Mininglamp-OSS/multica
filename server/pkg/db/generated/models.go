@@ -822,6 +822,18 @@ type WebhookDelivery struct {
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
 }
 
+type WebhookSubscription struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	ProjectID   pgtype.UUID        `json:"project_id"`
+	Url         string             `json:"url"`
+	Secret      string             `json:"secret"`
+	Events      []byte             `json:"events"`
+	Enabled     bool               `json:"enabled"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Workspace struct {
 	ID           pgtype.UUID        `json:"id"`
 	Name         string             `json:"name"`

@@ -1747,15 +1747,24 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 							"error", checkErr,
 						)
 					} else if !hasActive {
-						if _, updateErr := s.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
+						updated, updateErr := s.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
 							ID:          t.IssueID,
 							Status:      "todo",
 							WorkspaceID: issue.WorkspaceID,
-						}); updateErr != nil {
+						})
+						if updateErr != nil {
 							slog.Warn("handle failed tasks: reset stuck issue failed",
 								"issue_id", issueKey,
 								"error", updateErr,
 							)
+						} else {
+							// Publish a status-change event so outbound webhooks
+							// observe the auto-reset (in_progress → todo). Uses the
+							// map issue shape, which the webhook listener accepts;
+							// activity/notification listeners require the typed
+							// shape and therefore self-exclude, so this adds no new
+							// activity entries or notifications.
+							s.publishIssueStatusReset(updated, issue.Status)
 						}
 					}
 				}
@@ -2111,6 +2120,30 @@ func (s *TaskService) broadcastIssueUpdated(issue db.Issue) {
 	})
 }
 
+// publishIssueStatusReset publishes an issue:updated event carrying
+// status_changed + prev_status for a system-driven status reset (e.g. the
+// failed-task auto-reset of in_progress → todo). The map issue shape is what the
+// outbound-webhook listener consumes; the activity/notification listeners
+// require the typed handler.IssueResponse shape and so ignore this event,
+// keeping the reset free of new activity-log entries / notifications.
+func (s *TaskService) publishIssueStatusReset(issue db.Issue, prevStatus string) {
+	if prevStatus == issue.Status {
+		return
+	}
+	prefix := s.getIssuePrefix(issue.WorkspaceID)
+	s.Bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: util.UUIDToString(issue.WorkspaceID),
+		ActorType:   "system",
+		ActorID:     "",
+		Payload: map[string]any{
+			"issue":          issueToMap(issue, prefix),
+			"status_changed": true,
+			"prev_status":    prevStatus,
+		},
+	})
+}
+
 func (s *TaskService) getIssuePrefix(workspaceID pgtype.UUID) string {
 	ws, err := s.Queries.GetWorkspace(context.Background(), workspaceID)
 	if err != nil {
@@ -2231,6 +2264,7 @@ func issueToMap(issue db.Issue, issuePrefix string) map[string]any {
 		"creator_type":    issue.CreatorType,
 		"creator_id":      util.UUIDToString(issue.CreatorID),
 		"parent_issue_id": util.UUIDToPtr(issue.ParentIssueID),
+		"project_id":      util.UUIDToPtr(issue.ProjectID),
 		"position":        issue.Position,
 		"start_date":      util.DateToPtr(issue.StartDate),
 		"due_date":        util.DateToPtr(issue.DueDate),
