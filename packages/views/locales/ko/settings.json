@@ -34,6 +34,7 @@
       "repositories": "저장소",
       "github": "GitHub",
       "integrations": "연동",
+      "webhooks": "Webhook",
       "labs": "실험실",
       "members": "멤버"
     }
@@ -409,5 +410,31 @@
     "install_error_session_lost": "설치 세션이 만료되었거나 유실되었어요. 다시 스캔해 처음부터 진행하세요.",
     "install_error_forbidden": "이 워크스페이스에 Lark 봇을 설치할 권한이 더 이상 없어요. 워크스페이스 관리자에게 문의하세요.",
     "install_error_generic": "설치에 실패했어요. 다시 시도하세요."
+  },
+  "webhooks": {
+    "section_header": "Webhook",
+    "description_workspace": "이 워크스페이스의 어떤 issue든 상태가 바뀔 때마다 외부 URL로 서명된 HTTP POST를 전송합니다.",
+    "add_label": "엔드포인트 URL",
+    "add_button": "추가",
+    "event_hint": "issue 상태 변경 시 실행됩니다. 각 요청은 HMAC-SHA256으로 서명되어 X-Multica-Signature-256 헤더에 담깁니다.",
+    "empty": "아직 webhook이 없습니다.",
+    "admin_only": "워크스페이스 소유자와 관리자만 webhook을 관리할 수 있습니다.",
+    "toggle_label": "사용",
+    "delete_label": "webhook 삭제",
+    "secret_hint": "끝자리 {{hint}}",
+    "secret_dialog_title": "서명 시크릿 복사",
+    "secret_dialog_description": "이 시크릿은 한 번만 표시됩니다. 들어오는 요청의 X-Multica-Signature-256 헤더를 검증하는 데 사용하세요. 지금 안전한 곳에 보관하세요.",
+    "secret_dialog_done": "완료",
+    "delete_confirm_title": "이 webhook을 삭제할까요?",
+    "delete_confirm_description": "엔드포인트가 즉시 이벤트 수신을 중단합니다. 이 작업은 되돌릴 수 없습니다.",
+    "delete_confirm_cancel": "취소",
+    "delete_confirm_action": "삭제",
+    "toast_created": "webhook을 만들었습니다",
+    "toast_create_failed": "webhook 생성에 실패했습니다",
+    "toast_update_failed": "webhook 업데이트에 실패했습니다",
+    "toast_deleted": "webhook을 삭제했습니다",
+    "toast_delete_failed": "webhook 삭제에 실패했습니다",
+    "toast_secret_copied": "시크릿을 복사했습니다",
+    "toast_copy_failed": "복사에 실패했습니다"
   }
 }

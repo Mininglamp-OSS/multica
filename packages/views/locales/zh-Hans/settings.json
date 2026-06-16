@@ -34,6 +34,7 @@
       "repositories": "代码仓库",
       "github": "GitHub",
       "integrations": "集成",
+      "webhooks": "Webhook",
       "labs": "实验室",
       "members": "成员"
     }
@@ -332,6 +333,32 @@
     "install_error_session_lost": "安装会话已失效或丢失，请重新扫码。",
     "install_error_forbidden": "你已没有在此工作区安装飞书 Bot 的权限，请联系工作区管理员。",
     "install_error_generic": "安装失败，请重试。"
+  },
+  "webhooks": {
+    "section_header": "Webhook",
+    "description_workspace": "当这个工作区里任意 issue 的状态变化时，向外部 URL 发送一个带签名的 HTTP POST。",
+    "add_label": "接收地址",
+    "add_button": "添加",
+    "event_hint": "在 issue 状态变化时触发。每个请求都用 HMAC-SHA256 签名，放在 X-Multica-Signature-256 请求头里。",
+    "empty": "还没有 webhook。",
+    "admin_only": "只有工作区所有者和管理员可以管理 webhook。",
+    "toggle_label": "启用",
+    "delete_label": "删除 webhook",
+    "secret_hint": "尾号 {{hint}}",
+    "secret_dialog_title": "复制你的签名密钥",
+    "secret_dialog_description": "这个密钥只显示一次。用它来校验收到的请求里的 X-Multica-Signature-256 请求头。现在就妥善保存。",
+    "secret_dialog_done": "完成",
+    "delete_confirm_title": "删除这个 webhook？",
+    "delete_confirm_description": "接收地址会立刻停止收到事件。此操作无法撤销。",
+    "delete_confirm_cancel": "取消",
+    "delete_confirm_action": "删除",
+    "toast_created": "webhook 已创建",
+    "toast_create_failed": "创建 webhook 失败",
+    "toast_update_failed": "更新 webhook 失败",
+    "toast_deleted": "webhook 已删除",
+    "toast_delete_failed": "删除 webhook 失败",
+    "toast_secret_copied": "密钥已复制",
+    "toast_copy_failed": "复制失败"
   },
   "repositories": {
     "section_title": "代码仓库",

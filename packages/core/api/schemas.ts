@@ -24,6 +24,8 @@ import type {
   TimelineEntry,
   User,
   WebhookDelivery,
+  WebhookSubscription,
+  ListWebhookSubscriptionsResponse,
 } from "../types";
 import type { CloudRuntimeNode } from "../runtimes/cloud-runtime";
 
@@ -751,6 +753,44 @@ export const EMPTY_WEBHOOK_DELIVERY: WebhookDelivery = {
   received_at: "",
   last_attempt_at: "",
   created_at: "",
+};
+
+// Outbound webhook subscriptions. Lenient per API Response Compatibility:
+// enums stay z.string() (so a future event type doesn't fail the parse),
+// nullable fields union with null, `.loose()` lets unknown server fields pass.
+const WebhookSubscriptionSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  project_id: z.string().nullable(),
+  url: z.string(),
+  events: z.array(z.string()).default([]),
+  enabled: z.boolean().default(true),
+  secret_hint: z.string().default(""),
+  secret: z.string().optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+
+export const WebhookSubscriptionResponseSchema = WebhookSubscriptionSchema;
+
+export const ListWebhookSubscriptionsResponseSchema = z.object({
+  subscriptions: z.array(WebhookSubscriptionSchema).default([]),
+}).loose();
+
+export const EMPTY_LIST_WEBHOOK_SUBSCRIPTIONS_RESPONSE: ListWebhookSubscriptionsResponse = {
+  subscriptions: [],
+};
+
+export const EMPTY_WEBHOOK_SUBSCRIPTION: WebhookSubscription = {
+  id: "",
+  workspace_id: "",
+  project_id: null,
+  url: "",
+  events: [],
+  enabled: true,
+  secret_hint: "",
+  created_at: "",
+  updated_at: "",
 };
 
 // ---------------------------------------------------------------------------
