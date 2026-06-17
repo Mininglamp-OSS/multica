@@ -43,3 +43,20 @@ export function useDeleteWebhookSubscription(projectId?: string) {
     },
   });
 }
+
+// useRedeliverWebhookSubscriptionDelivery re-POSTs a stored payload. The server
+// enqueues it async (202), so the new row appears on the next list refetch —
+// invalidate the subscription's deliveries list on settle.
+export function useRedeliverWebhookSubscriptionDelivery(subscriptionId: string) {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+  return useMutation({
+    mutationFn: (deliveryId: string) =>
+      api.redeliverWebhookSubscriptionDelivery(subscriptionId, deliveryId),
+    onSettled: () => {
+      qc.invalidateQueries({
+        queryKey: webhookKeys.deliveries(wsId, subscriptionId),
+      });
+    },
+  });
+}

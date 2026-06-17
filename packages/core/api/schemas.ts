@@ -26,6 +26,8 @@ import type {
   WebhookDelivery,
   WebhookSubscription,
   ListWebhookSubscriptionsResponse,
+  OutboundWebhookDelivery,
+  ListOutboundWebhookDeliveriesResponse,
 } from "../types";
 import type { CloudRuntimeNode } from "../runtimes/cloud-runtime";
 
@@ -839,6 +841,50 @@ export const EMPTY_WEBHOOK_SUBSCRIPTION: WebhookSubscription = {
   secret_hint: "",
   created_at: "",
   updated_at: "",
+};
+
+// Outbound webhook delivery history (migration 122). Lenient per API Response
+// Compatibility: status stays z.string() (a future status won't fail the
+// parse), nullable fields union with null, bodies are detail-only optionals,
+// `.loose()` lets unknown server fields pass.
+const OutboundWebhookDeliverySchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  subscription_id: z.string(),
+  event: z.string(),
+  status: z.string(),
+  attempt_count: z.number().default(0),
+  response_status: z.number().nullable().default(null),
+  error: z.string().nullable().default(null),
+  redelivered_from_id: z.string().nullable().default(null),
+  created_at: z.string(),
+  request_body: z.string().nullable().optional(),
+  response_body: z.string().nullable().optional(),
+}).loose();
+
+export const OutboundWebhookDeliveryResponseSchema = OutboundWebhookDeliverySchema;
+
+export const ListOutboundWebhookDeliveriesResponseSchema = z.object({
+  deliveries: z.array(OutboundWebhookDeliverySchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_LIST_OUTBOUND_WEBHOOK_DELIVERIES_RESPONSE: ListOutboundWebhookDeliveriesResponse = {
+  deliveries: [],
+  total: 0,
+};
+
+export const EMPTY_OUTBOUND_WEBHOOK_DELIVERY: OutboundWebhookDelivery = {
+  id: "",
+  workspace_id: "",
+  subscription_id: "",
+  event: "",
+  status: "failed",
+  attempt_count: 0,
+  response_status: null,
+  error: null,
+  redelivered_from_id: null,
+  created_at: "",
 };
 
 // ---------------------------------------------------------------------------
