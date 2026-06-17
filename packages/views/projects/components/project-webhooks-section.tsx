@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronRight, Plus, Trash2 } from "lucide-react";
+import { ChevronRight, History, Plus, Trash2 } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Switch } from "@multica/ui/components/ui/switch";
 import {
@@ -12,6 +12,7 @@ import {
 import { useT } from "../../i18n";
 import { useWebhookSection } from "../../settings/components/use-webhook-section";
 import { WebhookDialogs } from "../../settings/components/webhook-dialogs";
+import { WebhookSubscriptionDeliveriesDialog } from "../../webhooks/components/webhook-subscription-deliveries-dialog";
 
 // Project-level outbound webhooks, rendered as a collapsible section in the
 // project detail right panel (directly below Resources). Shares all logic with
@@ -21,6 +22,8 @@ export function ProjectWebhooksSection({ projectId }: { projectId: string }) {
   const { t } = useT("settings");
   const [open, setOpen] = useState(false);
   const [adding, setAdding] = useState(false);
+  // Subscription id whose delivery history dialog is open, or null.
+  const [historyTarget, setHistoryTarget] = useState<string | null>(null);
 
   // Defer the subscription query until the section is expanded.
   const wh = useWebhookSection(projectId, open);
@@ -77,6 +80,14 @@ export function ProjectWebhooksSection({ projectId }: { projectId: string }) {
                     onCheckedChange={(v) => wh.handleToggle(sub, v)}
                     aria-label={t(($) => $.webhooks.toggle_label)}
                   />
+                  <button
+                    type="button"
+                    onClick={() => setHistoryTarget(sub.id)}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity rounded-sm p-0.5 hover:bg-accent"
+                    title={t(($) => $.webhooks.deliveries.history_button)}
+                  >
+                    <History className="size-3 text-muted-foreground" />
+                  </button>
                   <button
                     type="button"
                     onClick={() => wh.setDeleteTarget(sub)}
@@ -147,6 +158,16 @@ export function ProjectWebhooksSection({ projectId }: { projectId: string }) {
         handleDelete={wh.handleDelete}
         isDeleting={wh.isDeleting}
       />
+
+      {historyTarget && (
+        <WebhookSubscriptionDeliveriesDialog
+          subscriptionId={historyTarget}
+          open={historyTarget !== null}
+          onOpenChange={(open) => {
+            if (!open) setHistoryTarget(null);
+          }}
+        />
+      )}
     </div>
   );
 }

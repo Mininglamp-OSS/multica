@@ -358,7 +358,34 @@
     "toast_deleted": "webhook 已删除",
     "toast_delete_failed": "删除 webhook 失败",
     "toast_secret_copied": "密钥已复制",
-    "toast_copy_failed": "复制失败"
+    "toast_copy_failed": "复制失败",
+    "deliveries": {
+      "title": "投递历史",
+      "detail_title": "投递详情",
+      "empty": "暂无投递记录。",
+      "history_button": "投递历史",
+      "status": {
+        "delivered": "成功",
+        "failed": "失败"
+      },
+      "attempts": "{{count}} 次尝试",
+      "redelivered_badge": "已重投",
+      "created_at": "时间",
+      "attempt_count": "尝试次数",
+      "response_status": "响应状态",
+      "redelivered_from": "重投自",
+      "error_label": "错误",
+      "request_body": "请求体",
+      "response_body": "响应体",
+      "copy": "复制",
+      "copied": "已复制",
+      "copy_failed": "复制失败",
+      "truncated_marker": "… 已截断",
+      "redeliver_action": "重新投递",
+      "redeliver_in_progress": "正在重投…",
+      "redeliver_toast_success": "已加入重投队列",
+      "redeliver_toast_failed": "重投失败"
+    }
   },
   "repositories": {
     "section_title": "代码仓库",

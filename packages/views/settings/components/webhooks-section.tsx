@@ -1,6 +1,7 @@
 "use client";
 
-import { Plus, Trash2, Webhook } from "lucide-react";
+import { useState } from "react";
+import { History, Plus, Trash2, Webhook } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardContent } from "@multica/ui/components/ui/card";
 import { Input } from "@multica/ui/components/ui/input";
@@ -10,12 +11,15 @@ import { Badge } from "@multica/ui/components/ui/badge";
 import { useT } from "../../i18n";
 import { useWebhookSection } from "./use-webhook-section";
 import { WebhookDialogs } from "./webhook-dialogs";
+import { WebhookSubscriptionDeliveriesDialog } from "../../webhooks/components/webhook-subscription-deliveries-dialog";
 
 // Workspace-level outbound webhooks (Settings → Webhooks tab). Logic lives in
 // useWebhookSection; this component owns only the settings-card layout.
 export function WebhooksSection() {
   const { t } = useT("settings");
   const wh = useWebhookSection();
+  // Subscription id whose delivery history dialog is open, or null.
+  const [historyTarget, setHistoryTarget] = useState<string | null>(null);
 
   if (!wh.canManage) {
     return (
@@ -103,6 +107,14 @@ export function WebhooksSection() {
                   <Button
                     variant="ghost"
                     size="icon"
+                    onClick={() => setHistoryTarget(sub.id)}
+                    aria-label={t(($) => $.webhooks.deliveries.history_button)}
+                  >
+                    <History className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
                     onClick={() => wh.setDeleteTarget(sub)}
                     aria-label={t(($) => $.webhooks.delete_label)}
                   >
@@ -124,6 +136,16 @@ export function WebhooksSection() {
         handleDelete={wh.handleDelete}
         isDeleting={wh.isDeleting}
       />
+
+      {historyTarget && (
+        <WebhookSubscriptionDeliveriesDialog
+          subscriptionId={historyTarget}
+          open={historyTarget !== null}
+          onOpenChange={(open) => {
+            if (!open) setHistoryTarget(null);
+          }}
+        />
+      )}
     </div>
   );
 }
