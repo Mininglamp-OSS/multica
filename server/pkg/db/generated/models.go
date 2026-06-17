@@ -578,6 +578,21 @@ type OctoUserBinding struct {
 	BoundAt        pgtype.Timestamptz `json:"bound_at"`
 }
 
+type OutboundWebhookDelivery struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	SubscriptionID    pgtype.UUID        `json:"subscription_id"`
+	Event             string             `json:"event"`
+	Status            string             `json:"status"`
+	AttemptCount      int32              `json:"attempt_count"`
+	ResponseStatus    pgtype.Int4        `json:"response_status"`
+	RequestBody       []byte             `json:"request_body"`
+	ResponseBody      pgtype.Text        `json:"response_body"`
+	Error             pgtype.Text        `json:"error"`
+	RedeliveredFromID pgtype.UUID        `json:"redelivered_from_id"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
 type PersonalAccessToken struct {
 	ID          pgtype.UUID        `json:"id"`
 	UserID      pgtype.UUID        `json:"user_id"`
