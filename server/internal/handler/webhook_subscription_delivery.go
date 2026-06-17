@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -112,21 +111,7 @@ func (h *Handler) ListWebhookSubscriptionDeliveries(w http.ResponseWriter, r *ht
 		return
 	}
 
-	limit := int32(20)
-	offset := int32(0)
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if v, err := strconv.Atoi(l); err == nil && v > 0 {
-			limit = int32(v)
-		}
-	}
-	if limit > 100 {
-		limit = 100
-	}
-	if o := r.URL.Query().Get("offset"); o != "" {
-		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
-			offset = int32(v)
-		}
-	}
+	limit, offset := parsePagination(r, 20, 100)
 
 	rows, err := h.Queries.ListOutboundWebhookDeliveries(r.Context(), db.ListOutboundWebhookDeliveriesParams{
 		SubscriptionID: sub.ID,
@@ -139,16 +124,12 @@ func (h *Handler) ListWebhookSubscriptionDeliveries(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusInternalServerError, "failed to list deliveries")
 		return
 	}
-	total, err := h.Queries.CountOutboundWebhookDeliveries(r.Context(), db.CountOutboundWebhookDeliveriesParams{
-		SubscriptionID: sub.ID,
-		WorkspaceID:    sub.WorkspaceID,
-	})
-	if err != nil {
-		slog.Error("count outbound webhook deliveries failed", "error", err, "subscription_id", uuidToString(sub.ID))
-		writeError(w, http.StatusInternalServerError, "failed to list deliveries")
-		return
-	}
 
+	// total comes from the window count on each row; an empty page means 0.
+	var total int64
+	if len(rows) > 0 {
+		total = rows[0].Total
+	}
 	resp := make([]OutboundWebhookDeliveryResponse, len(rows))
 	for i, row := range rows {
 		resp[i] = slimOutboundDeliveryToResponse(row)

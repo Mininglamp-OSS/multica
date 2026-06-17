@@ -11,23 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const countOutboundWebhookDeliveries = `-- name: CountOutboundWebhookDeliveries :one
-SELECT count(*) FROM outbound_webhook_delivery
-WHERE subscription_id = $1 AND workspace_id = $2
-`
-
-type CountOutboundWebhookDeliveriesParams struct {
-	SubscriptionID pgtype.UUID `json:"subscription_id"`
-	WorkspaceID    pgtype.UUID `json:"workspace_id"`
-}
-
-func (q *Queries) CountOutboundWebhookDeliveries(ctx context.Context, arg CountOutboundWebhookDeliveriesParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countOutboundWebhookDeliveries, arg.SubscriptionID, arg.WorkspaceID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createOutboundWebhookDelivery = `-- name: CreateOutboundWebhookDelivery :one
 
 INSERT INTO outbound_webhook_delivery (
@@ -130,7 +113,8 @@ func (q *Queries) GetOutboundWebhookDeliveryInWorkspace(ctx context.Context, arg
 const listOutboundWebhookDeliveries = `-- name: ListOutboundWebhookDeliveries :many
 SELECT
     id, workspace_id, subscription_id, event, status, attempt_count,
-    response_status, error, redelivered_from_id, created_at
+    response_status, error, redelivered_from_id, created_at,
+    count(*) OVER() AS total
 FROM outbound_webhook_delivery
 WHERE subscription_id = $1 AND workspace_id = $2
 ORDER BY created_at DESC
@@ -155,6 +139,7 @@ type ListOutboundWebhookDeliveriesRow struct {
 	Error             pgtype.Text        `json:"error"`
 	RedeliveredFromID pgtype.UUID        `json:"redelivered_from_id"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	Total             int64              `json:"total"`
 }
 
 // Per-subscription listing, newest first, paged by limit/offset. Workspace-
@@ -162,7 +147,9 @@ type ListOutboundWebhookDeliveriesRow struct {
 // subscription. Slim projection: request_body / response_body are deliberately
 // excluded — a page of 4 KiB+ bodies would be pulled from Postgres just to be
 // dropped in the JSON encoder. Detail views fetch the full row via
-// GetOutboundWebhookDeliveryInWorkspace.
+// GetOutboundWebhookDeliveryInWorkspace. `total` is the full unpaged count via a
+// window function, so listing + counting is one round-trip (0 rows → no total,
+// which the handler reads as 0).
 func (q *Queries) ListOutboundWebhookDeliveries(ctx context.Context, arg ListOutboundWebhookDeliveriesParams) ([]ListOutboundWebhookDeliveriesRow, error) {
 	rows, err := q.db.Query(ctx, listOutboundWebhookDeliveries,
 		arg.SubscriptionID,
@@ -188,6 +175,7 @@ func (q *Queries) ListOutboundWebhookDeliveries(ctx context.Context, arg ListOut
 			&i.Error,
 			&i.RedeliveredFromID,
 			&i.CreatedAt,
+			&i.Total,
 		); err != nil {
 			return nil, err
 		}
