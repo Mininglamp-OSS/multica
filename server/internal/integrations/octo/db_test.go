@@ -122,7 +122,7 @@ func fixture(t *testing.T) (workspaceID, userID, agentID pgtype.UUID) {
 
 func newInstallation(t *testing.T, q *db.Queries, wsID, userID, agentID pgtype.UUID) db.OctoInstallation {
 	t.Helper()
-	inst, err := q.CreateOctoInstallation(context.Background(), db.CreateOctoInstallationParams{
+	inst, err := q.UpsertOctoInstallation(context.Background(), db.UpsertOctoInstallationParams{
 		WorkspaceID:       wsID,
 		AgentID:           agentID,
 		BotTokenEncrypted: []byte("ciphertext"),
@@ -134,7 +134,7 @@ func newInstallation(t *testing.T, q *db.Queries, wsID, userID, agentID pgtype.U
 		InstallerUserID:   userID,
 	})
 	if err != nil {
-		t.Fatalf("CreateOctoInstallation: %v", err)
+		t.Fatalf("UpsertOctoInstallation: %v", err)
 	}
 	return inst
 }
@@ -156,14 +156,6 @@ func TestOctoInstallation_CRUD(t *testing.T) {
 	}
 	if got.ID != inst.ID {
 		t.Errorf("GetByRobotID returned wrong row")
-	}
-
-	// GetByAgent — one bot per agent.
-	got2, err := q.GetOctoInstallationByAgent(context.Background(), db.GetOctoInstallationByAgentParams{
-		WorkspaceID: wsID, AgentID: agentID,
-	})
-	if err != nil || got2.ID != inst.ID {
-		t.Fatalf("GetByAgent: %v", err)
 	}
 
 	// List active includes it.

@@ -11,23 +11,12 @@
 -- octo_installation
 -- =====================
 
--- name: CreateOctoInstallation :one
--- Used when an admin configures a bot for an agent. `bot_token_encrypted` is the
--- ciphertext produced by internal/util/secretbox — never plaintext. The
--- (workspace_id, agent_id) UNIQUE constraint enforces "one Multica Agent ↔ one
--- Octo Bot"; re-configuring goes through UpsertOctoInstallation.
-INSERT INTO octo_installation (
-    workspace_id, agent_id, bot_token_encrypted,
-    robot_id, bot_name, owner_uid, api_url, ws_url, installer_user_id
-) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9
-)
-RETURNING *;
-
 -- name: UpsertOctoInstallation :one
--- Re-configure path: an admin updates the bot token or the bot is re-registered
--- (cached identity fields refreshed). Forces status back to 'active'. The WS
--- lease is intentionally NOT reset here — the inbound hub owns lease lifecycle.
+-- Configure / re-configure path: an admin sets or updates the bot token, or the
+-- bot is re-registered (cached identity fields refreshed). Forces status back to
+-- 'active'. The (workspace_id, agent_id) UNIQUE constraint enforces "one Multica
+-- Agent ↔ one Octo Bot". The WS lease is intentionally NOT reset here — the
+-- inbound hub owns lease lifecycle.
 INSERT INTO octo_installation (
     workspace_id, agent_id, bot_token_encrypted,
     robot_id, bot_name, owner_uid, api_url, ws_url, installer_user_id
@@ -54,10 +43,6 @@ SELECT * FROM octo_installation WHERE id = $1;
 SELECT * FROM octo_installation
 WHERE id = $1 AND workspace_id = $2;
 
--- name: GetOctoInstallationByAgent :one
-SELECT * FROM octo_installation
-WHERE workspace_id = $1 AND agent_id = $2;
-
 -- name: GetOctoInstallationByRobotID :one
 -- Used by the inbound dispatcher to route an event (which carries the bot's
 -- robot_id) to its installation row.
@@ -79,9 +64,6 @@ ORDER BY created_at ASC;
 UPDATE octo_installation
 SET status = $2, updated_at = now()
 WHERE id = $1;
-
--- name: DeleteOctoInstallation :exec
-DELETE FROM octo_installation WHERE id = $1 AND workspace_id = $2;
 
 -- name: AcquireOctoWSLease :one
 -- Atomically claims the WebSocket lease for an installation. The CAS predicate

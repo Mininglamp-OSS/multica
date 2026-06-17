@@ -100,16 +100,23 @@ func restrictedDialContext(dialer *net.Dialer) func(context.Context, string, str
 		if err != nil {
 			return nil, err
 		}
-		if len(ips) == 0 {
-			return nil, fmt.Errorf("netguard: no addresses for host %q", host)
-		}
+		// Dial the first non-blocked resolved address. We pin the exact IP we
+		// vetted (so a concurrent rebind can't swap in a blocked address between
+		// check and connect) and skip blocked ones rather than failing the whole
+		// dial — a legitimate host that also resolves to an internal address
+		// (split-horizon DNS) is still reachable via its public IP, while an
+		// internal IP is never dialed.
+		var lastErr error
 		for _, ipa := range ips {
 			if IsBlockedIP(ipa.IP) {
-				return nil, fmt.Errorf("netguard: refusing to connect to internal address %s (host %q)", ipa.IP, host)
+				lastErr = fmt.Errorf("netguard: refusing to connect to internal address %s (host %q)", ipa.IP, host)
+				continue
 			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ipa.IP.String(), port))
 		}
-		// Dial the exact IP we just verified so a concurrent rebind can't swap
-		// in a blocked address between the check and the connect.
-		return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("netguard: no addresses for host %q", host)
 	}
 }

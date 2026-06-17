@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -38,16 +39,34 @@ type MessageSender interface {
 	Send(ctx context.Context, apiURL, botToken, channelID string, channelType transport.ChannelType, content string) (*transport.SendMessageResult, error)
 }
 
-// octoMessageSender is the production MessageSender. It constructs a per-call
-// transport.HTTPClient because each installation has its own api_url + token.
-type octoMessageSender struct{}
+// octoMessageSender is the production MessageSender. It caches one
+// transport.HTTPClient per (api_url, token) so repeated replies/edits to the
+// same installation reuse the underlying connection pool instead of paying a
+// fresh TCP+TLS handshake per message.
+type octoMessageSender struct {
+	mu      sync.Mutex
+	clients map[string]*transport.HTTPClient
+}
 
 // NewMessageSender returns the production MessageSender.
-func NewMessageSender() MessageSender { return octoMessageSender{} }
+func NewMessageSender() MessageSender {
+	return &octoMessageSender{clients: make(map[string]*transport.HTTPClient)}
+}
 
-func (octoMessageSender) Send(ctx context.Context, apiURL, botToken, channelID string, channelType transport.ChannelType, content string) (*transport.SendMessageResult, error) {
-	client := transport.NewHTTPClient(apiURL, botToken)
-	return client.SendMessage(ctx, transport.SendMessageParams{
+func (s *octoMessageSender) client(apiURL, botToken string) *transport.HTTPClient {
+	key := apiURL + "\x00" + botToken
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.clients[key]
+	if !ok {
+		c = transport.NewHTTPClient(apiURL, botToken)
+		s.clients[key] = c
+	}
+	return c
+}
+
+func (s *octoMessageSender) Send(ctx context.Context, apiURL, botToken, channelID string, channelType transport.ChannelType, content string) (*transport.SendMessageResult, error) {
+	return s.client(apiURL, botToken).SendMessage(ctx, transport.SendMessageParams{
 		ChannelID:   channelID,
 		ChannelType: channelType,
 		Content:     content,

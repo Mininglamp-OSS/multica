@@ -35,6 +35,10 @@ type AcquireOctoWSLeaseParams struct {
 // accepts the lease when (a) no current holder exists, (b) the holder's lease
 // has expired, or (c) the holder is us (renewal). Returns the row when claimed;
 // returns no rows when another live holder still owns it.
+// Deliberately does NOT touch updated_at: lease acquire/renew is high-frequency
+// operational churn, not a config change. The hub treats an advancing
+// updated_at as a reconfigure signal (and restarts the supervisor), so bumping
+// it here would make every renewal look like a reconfigure and loop forever.
 func (q *Queries) AcquireOctoWSLease(ctx context.Context, arg AcquireOctoWSLeaseParams) (OctoInstallation, error) {
 	row := q.db.QueryRow(ctx, acquireOctoWSLease, arg.NewToken, arg.NewExpiresAt, arg.ID)
 	var i OctoInstallation
@@ -216,79 +220,6 @@ func (q *Queries) CreateOctoChatSessionBinding(ctx context.Context, arg CreateOc
 	return i, err
 }
 
-const createOctoInstallation = `-- name: CreateOctoInstallation :one
-
-
-INSERT INTO octo_installation (
-    workspace_id, agent_id, bot_token_encrypted,
-    robot_id, bot_name, owner_uid, api_url, ws_url, installer_user_id
-) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9
-)
-RETURNING id, workspace_id, agent_id, bot_token_encrypted, robot_id, bot_name, owner_uid, api_url, ws_url, installer_user_id, status, ws_lease_token, ws_lease_expires_at, installed_at, created_at, updated_at
-`
-
-type CreateOctoInstallationParams struct {
-	WorkspaceID       pgtype.UUID `json:"workspace_id"`
-	AgentID           pgtype.UUID `json:"agent_id"`
-	BotTokenEncrypted []byte      `json:"bot_token_encrypted"`
-	RobotID           string      `json:"robot_id"`
-	BotName           string      `json:"bot_name"`
-	OwnerUid          string      `json:"owner_uid"`
-	ApiUrl            string      `json:"api_url"`
-	WsUrl             string      `json:"ws_url"`
-	InstallerUserID   pgtype.UUID `json:"installer_user_id"`
-}
-
-// Octo IM Bot integration queries. The migration that defines these tables
-// lives at server/migrations/120_octo_integration.up.sql.
-//
-// Scoping convention: every public-facing read goes through a workspace-scoped
-// variant where one exists. The lookups that take only a UUID PK (e.g.
-// GetOctoInstallation) are reserved for internal trusted callers (the WS lease
-// scanner, the inbound dispatcher after identity resolution); HTTP handlers
-// should prefer the *InWorkspace forms.
-// =====================
-// octo_installation
-// =====================
-// Used when an admin configures a bot for an agent. `bot_token_encrypted` is the
-// ciphertext produced by internal/util/secretbox — never plaintext. The
-// (workspace_id, agent_id) UNIQUE constraint enforces "one Multica Agent ↔ one
-// Octo Bot"; re-configuring goes through UpsertOctoInstallation.
-func (q *Queries) CreateOctoInstallation(ctx context.Context, arg CreateOctoInstallationParams) (OctoInstallation, error) {
-	row := q.db.QueryRow(ctx, createOctoInstallation,
-		arg.WorkspaceID,
-		arg.AgentID,
-		arg.BotTokenEncrypted,
-		arg.RobotID,
-		arg.BotName,
-		arg.OwnerUid,
-		arg.ApiUrl,
-		arg.WsUrl,
-		arg.InstallerUserID,
-	)
-	var i OctoInstallation
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.AgentID,
-		&i.BotTokenEncrypted,
-		&i.RobotID,
-		&i.BotName,
-		&i.OwnerUid,
-		&i.ApiUrl,
-		&i.WsUrl,
-		&i.InstallerUserID,
-		&i.Status,
-		&i.WsLeaseToken,
-		&i.WsLeaseExpiresAt,
-		&i.InstalledAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
 const createOctoOutboundMessage = `-- name: CreateOctoOutboundMessage :one
 
 INSERT INTO octo_outbound_message (
@@ -389,20 +320,6 @@ func (q *Queries) CreateOctoUserBinding(ctx context.Context, arg CreateOctoUserB
 	return i, err
 }
 
-const deleteOctoInstallation = `-- name: DeleteOctoInstallation :exec
-DELETE FROM octo_installation WHERE id = $1 AND workspace_id = $2
-`
-
-type DeleteOctoInstallationParams struct {
-	ID          pgtype.UUID `json:"id"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-}
-
-func (q *Queries) DeleteOctoInstallation(ctx context.Context, arg DeleteOctoInstallationParams) error {
-	_, err := q.db.Exec(ctx, deleteOctoInstallation, arg.ID, arg.WorkspaceID)
-	return err
-}
-
 const deleteOctoUserBinding = `-- name: DeleteOctoUserBinding :exec
 DELETE FROM octo_user_binding WHERE id = $1
 `
@@ -466,40 +383,6 @@ SELECT id, workspace_id, agent_id, bot_token_encrypted, robot_id, bot_name, owne
 
 func (q *Queries) GetOctoInstallation(ctx context.Context, id pgtype.UUID) (OctoInstallation, error) {
 	row := q.db.QueryRow(ctx, getOctoInstallation, id)
-	var i OctoInstallation
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.AgentID,
-		&i.BotTokenEncrypted,
-		&i.RobotID,
-		&i.BotName,
-		&i.OwnerUid,
-		&i.ApiUrl,
-		&i.WsUrl,
-		&i.InstallerUserID,
-		&i.Status,
-		&i.WsLeaseToken,
-		&i.WsLeaseExpiresAt,
-		&i.InstalledAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const getOctoInstallationByAgent = `-- name: GetOctoInstallationByAgent :one
-SELECT id, workspace_id, agent_id, bot_token_encrypted, robot_id, bot_name, owner_uid, api_url, ws_url, installer_user_id, status, ws_lease_token, ws_lease_expires_at, installed_at, created_at, updated_at FROM octo_installation
-WHERE workspace_id = $1 AND agent_id = $2
-`
-
-type GetOctoInstallationByAgentParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	AgentID     pgtype.UUID `json:"agent_id"`
-}
-
-func (q *Queries) GetOctoInstallationByAgent(ctx context.Context, arg GetOctoInstallationByAgentParams) (OctoInstallation, error) {
-	row := q.db.QueryRow(ctx, getOctoInstallationByAgent, arg.WorkspaceID, arg.AgentID)
 	var i OctoInstallation
 	err := row.Scan(
 		&i.ID,
@@ -926,7 +809,8 @@ type ReleaseOctoWSLeaseParams struct {
 }
 
 // Drops the lease iff we're still the holder. A racing acquirer that already
-// took over will not have its lease cleared.
+// took over will not have its lease cleared. Like AcquireOctoWSLease, this does
+// NOT bump updated_at (lease churn is not a config change).
 func (q *Queries) ReleaseOctoWSLease(ctx context.Context, arg ReleaseOctoWSLeaseParams) error {
 	_, err := q.db.Exec(ctx, releaseOctoWSLease, arg.ID, arg.CurrentToken)
 	return err
@@ -966,6 +850,8 @@ func (q *Queries) UpdateOctoOutboundMessageStatus(ctx context.Context, arg Updat
 }
 
 const upsertOctoInstallation = `-- name: UpsertOctoInstallation :one
+
+
 INSERT INTO octo_installation (
     workspace_id, agent_id, bot_token_encrypted,
     robot_id, bot_name, owner_uid, api_url, ws_url, installer_user_id
@@ -998,9 +884,22 @@ type UpsertOctoInstallationParams struct {
 	InstallerUserID   pgtype.UUID `json:"installer_user_id"`
 }
 
-// Re-configure path: an admin updates the bot token or the bot is re-registered
-// (cached identity fields refreshed). Forces status back to 'active'. The WS
-// lease is intentionally NOT reset here — the inbound hub owns lease lifecycle.
+// Octo IM Bot integration queries. The migration that defines these tables
+// lives at server/migrations/120_octo_integration.up.sql.
+//
+// Scoping convention: every public-facing read goes through a workspace-scoped
+// variant where one exists. The lookups that take only a UUID PK (e.g.
+// GetOctoInstallation) are reserved for internal trusted callers (the WS lease
+// scanner, the inbound dispatcher after identity resolution); HTTP handlers
+// should prefer the *InWorkspace forms.
+// =====================
+// octo_installation
+// =====================
+// Configure / re-configure path: an admin sets or updates the bot token, or the
+// bot is re-registered (cached identity fields refreshed). Forces status back to
+// 'active'. The (workspace_id, agent_id) UNIQUE constraint enforces "one Multica
+// Agent ↔ one Octo Bot". The WS lease is intentionally NOT reset here — the
+// inbound hub owns lease lifecycle.
 func (q *Queries) UpsertOctoInstallation(ctx context.Context, arg UpsertOctoInstallationParams) (OctoInstallation, error) {
 	row := q.db.QueryRow(ctx, upsertOctoInstallation,
 		arg.WorkspaceID,
