@@ -51,3 +51,11 @@ CREATE INDEX idx_outbound_webhook_delivery_sub
 -- older than the retention window).
 CREATE INDEX idx_outbound_webhook_delivery_created
     ON outbound_webhook_delivery(created_at);
+
+-- Self-reference lookup for the redelivery lineage FK. Postgres does not
+-- auto-index FK columns, and the TTL purge's ON DELETE SET NULL must find rows
+-- referencing each deleted parent — without this index that's a sequential
+-- scan per purged row. Partial because only redelivered rows carry the link.
+CREATE INDEX idx_outbound_webhook_delivery_redelivered_from
+    ON outbound_webhook_delivery(redelivered_from_id)
+    WHERE redelivered_from_id IS NOT NULL;
