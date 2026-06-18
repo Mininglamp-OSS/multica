@@ -435,6 +435,33 @@
     "toast_deleted": "webhook을 삭제했습니다",
     "toast_delete_failed": "webhook 삭제에 실패했습니다",
     "toast_secret_copied": "시크릿을 복사했습니다",
-    "toast_copy_failed": "복사에 실패했습니다"
+    "toast_copy_failed": "복사에 실패했습니다",
+    "deliveries": {
+      "title": "전송 기록",
+      "detail_title": "전송 상세",
+      "empty": "아직 전송 기록이 없습니다.",
+      "history_button": "전송 기록",
+      "status": {
+        "delivered": "성공",
+        "failed": "실패"
+      },
+      "attempts": "{{count}}회 시도",
+      "redelivered_badge": "재전송됨",
+      "created_at": "시간",
+      "attempt_count": "시도 횟수",
+      "response_status": "응답 상태",
+      "redelivered_from": "재전송 원본",
+      "error_label": "오류",
+      "request_body": "요청 본문",
+      "response_body": "응답 본문",
+      "copy": "복사",
+      "copied": "복사됨",
+      "copy_failed": "복사 실패",
+      "truncated_marker": "… 잘림",
+      "redeliver_action": "재전송",
+      "redeliver_in_progress": "재전송 중…",
+      "redeliver_toast_success": "재전송이 대기열에 추가되었습니다",
+      "redeliver_toast_failed": "재전송 실패"
+    }
   }
 }

@@ -165,7 +165,19 @@ type Handler struct {
 	// OctoAPIBaseURL is the default Octo REST base (MULTICA_OCTO_API_URL),
 	// used by CreateOctoInstallation when the request omits api_url.
 	OctoAPIBaseURL string
-	cfg            Config
+	// WebhookDispatcher redelivers outbound webhook deliveries. Nil-safe: the
+	// redeliver handler returns 503 when unset. Assigned in main.go after the
+	// dispatcher is constructed (the field is read at request time).
+	WebhookDispatcher WebhookRedeliverer
+	cfg               Config
+}
+
+// WebhookRedeliverer re-POSTs a stored outbound webhook payload to a
+// subscription's current endpoint. Satisfied by *outwebhook.Dispatcher; an
+// interface so the handler package does not import outwebhook. Returns false
+// when the delivery queue is full (transient back-pressure).
+type WebhookRedeliverer interface {
+	Redeliver(sub db.WebhookSubscription, event string, body []byte, fromID pgtype.UUID) bool
 }
 
 func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {

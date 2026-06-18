@@ -358,7 +358,34 @@
     "toast_deleted": "webhook を削除しました",
     "toast_delete_failed": "webhook の削除に失敗しました",
     "toast_secret_copied": "シークレットをコピーしました",
-    "toast_copy_failed": "コピーに失敗しました"
+    "toast_copy_failed": "コピーに失敗しました",
+    "deliveries": {
+      "title": "配信履歴",
+      "detail_title": "配信の詳細",
+      "empty": "まだ配信はありません。",
+      "history_button": "配信履歴",
+      "status": {
+        "delivered": "成功",
+        "failed": "失敗"
+      },
+      "attempts": "{{count}} 回試行",
+      "redelivered_badge": "再配信済み",
+      "created_at": "時刻",
+      "attempt_count": "試行回数",
+      "response_status": "レスポンス",
+      "redelivered_from": "再配信元",
+      "error_label": "エラー",
+      "request_body": "リクエストボディ",
+      "response_body": "レスポンスボディ",
+      "copy": "コピー",
+      "copied": "コピーしました",
+      "copy_failed": "コピーに失敗しました",
+      "truncated_marker": "… 省略されました",
+      "redeliver_action": "再配信",
+      "redeliver_in_progress": "再配信中…",
+      "redeliver_toast_success": "再配信をキューに追加しました",
+      "redeliver_toast_failed": "再配信に失敗しました"
+    }
   },
   "repositories": {
     "section_title": "リポジトリ",

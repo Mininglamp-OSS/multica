@@ -147,6 +147,9 @@ export type {
   CreateWebhookSubscriptionRequest,
   UpdateWebhookSubscriptionRequest,
   ListWebhookSubscriptionsResponse,
+  OutboundWebhookDelivery,
+  OutboundWebhookDeliveryStatus,
+  ListOutboundWebhookDeliveriesResponse,
 } from "./webhook-subscription";
 export type {
   Squad,

@@ -324,6 +324,11 @@ func main() {
 		HeartbeatScheduler: heartbeatScheduler,
 	})
 
+	// Let the redeliver endpoint enqueue manual outbound webhook redeliveries.
+	// Assigned post-construction (the field is read at request time), mirroring
+	// the other optional Handler deps wired here.
+	h.WebhookDispatcher = webhookDispatcher
+
 	srv := &http.Server{
 		Addr:    ":" + port,
 		Handler: r,
@@ -401,6 +406,13 @@ func main() {
 		} else {
 			registeredAny = true
 		}
+	}
+	// Outbound webhook delivery-history cleanup: purge rows past the retention
+	// window so the table does not grow unbounded.
+	if err := schedulerMgr.Register(scheduler.OutboundWebhookDeliveryCleanupJob(pool)); err != nil {
+		slog.Warn("scheduler: failed to register outbound_webhook_cleanup job", "error", err)
+	} else {
+		registeredAny = true
 	}
 	if registeredAny {
 		go func() {

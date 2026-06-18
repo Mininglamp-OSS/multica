@@ -888,6 +888,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Post("/", h.CreateWebhookSubscription)
 				r.Patch("/{id}", h.UpdateWebhookSubscription)
 				r.Delete("/{id}", h.DeleteWebhookSubscription)
+				r.Get("/{id}/deliveries", h.ListWebhookSubscriptionDeliveries)
+				r.Get("/{id}/deliveries/{deliveryId}", h.GetWebhookSubscriptionDelivery)
+				r.Post("/{id}/deliveries/{deliveryId}/redeliver", h.RedeliverWebhookSubscriptionDelivery)
 			})
 
 			// Pins

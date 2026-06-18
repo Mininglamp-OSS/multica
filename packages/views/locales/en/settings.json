@@ -358,7 +358,34 @@
     "toast_deleted": "Webhook deleted",
     "toast_delete_failed": "Failed to delete webhook",
     "toast_secret_copied": "Secret copied",
-    "toast_copy_failed": "Failed to copy"
+    "toast_copy_failed": "Failed to copy",
+    "deliveries": {
+      "title": "Delivery history",
+      "detail_title": "Delivery detail",
+      "empty": "No deliveries yet.",
+      "history_button": "Delivery history",
+      "status": {
+        "delivered": "Delivered",
+        "failed": "Failed"
+      },
+      "attempts": "{{count}} attempts",
+      "redelivered_badge": "Redelivered",
+      "created_at": "Time",
+      "attempt_count": "Attempts",
+      "response_status": "Response",
+      "redelivered_from": "Redelivered from",
+      "error_label": "Error",
+      "request_body": "Request body",
+      "response_body": "Response body",
+      "copy": "Copy",
+      "copied": "Copied",
+      "copy_failed": "Failed to copy",
+      "truncated_marker": "… truncated",
+      "redeliver_action": "Redeliver",
+      "redeliver_in_progress": "Redelivering…",
+      "redeliver_toast_success": "Redelivery queued",
+      "redeliver_toast_failed": "Failed to redeliver"
+    }
   },
   "repositories": {
     "section_title": "Repositories",

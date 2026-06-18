@@ -101,6 +101,8 @@ import type {
   CreateWebhookSubscriptionRequest,
   UpdateWebhookSubscriptionRequest,
   ListWebhookSubscriptionsResponse,
+  OutboundWebhookDelivery,
+  ListOutboundWebhookDeliveriesResponse,
   NotificationPreferenceResponse,
   NotificationPreferences,
   GitHubPullRequest,
@@ -189,6 +191,10 @@ import {
   ListWebhookSubscriptionsResponseSchema,
   EMPTY_LIST_WEBHOOK_SUBSCRIPTIONS_RESPONSE,
   EMPTY_WEBHOOK_SUBSCRIPTION,
+  OutboundWebhookDeliveryResponseSchema,
+  ListOutboundWebhookDeliveriesResponseSchema,
+  EMPTY_LIST_OUTBOUND_WEBHOOK_DELIVERIES_RESPONSE,
+  EMPTY_OUTBOUND_WEBHOOK_DELIVERY,
   BillingBalanceSchema,
   BillingTransactionsPageSchema,
   BillingBatchesPageSchema,
@@ -2170,6 +2176,53 @@ export class ApiClient {
 
   async deleteWebhookSubscription(id: string): Promise<void> {
     await this.fetch(`/api/webhook-subscriptions/${id}`, { method: "DELETE" });
+  }
+
+  // Outbound webhook delivery history (per subscription).
+  async listWebhookSubscriptionDeliveries(
+    subscriptionId: string,
+    params?: { limit?: number; offset?: number },
+  ): Promise<ListOutboundWebhookDeliveriesResponse> {
+    const search = new URLSearchParams();
+    if (params?.limit != null) search.set("limit", String(params.limit));
+    if (params?.offset != null) search.set("offset", String(params.offset));
+    const qs = search.toString();
+    const raw = await this.fetch<unknown>(
+      `/api/webhook-subscriptions/${subscriptionId}/deliveries${qs ? `?${qs}` : ""}`,
+    );
+    return parseWithFallback(
+      raw,
+      ListOutboundWebhookDeliveriesResponseSchema,
+      EMPTY_LIST_OUTBOUND_WEBHOOK_DELIVERIES_RESPONSE,
+      { endpoint: "GET /api/webhook-subscriptions/:id/deliveries" },
+    );
+  }
+
+  async getWebhookSubscriptionDelivery(
+    subscriptionId: string,
+    deliveryId: string,
+  ): Promise<OutboundWebhookDelivery> {
+    const raw = await this.fetch<unknown>(
+      `/api/webhook-subscriptions/${subscriptionId}/deliveries/${deliveryId}`,
+    );
+    return parseWithFallback(
+      raw,
+      OutboundWebhookDeliveryResponseSchema,
+      { ...EMPTY_OUTBOUND_WEBHOOK_DELIVERY, id: deliveryId, subscription_id: subscriptionId },
+      { endpoint: "GET /api/webhook-subscriptions/:id/deliveries/:deliveryId" },
+    );
+  }
+
+  // Redeliver re-POSTs the stored payload; the server enqueues it and returns
+  // 202 (no body of interest), so the caller just refetches the list.
+  async redeliverWebhookSubscriptionDelivery(
+    subscriptionId: string,
+    deliveryId: string,
+  ): Promise<void> {
+    await this.fetch(
+      `/api/webhook-subscriptions/${subscriptionId}/deliveries/${deliveryId}/redeliver`,
+      { method: "POST" },
+    );
   }
 
   // GitHub integration
