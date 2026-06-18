@@ -83,7 +83,8 @@ export function ProjectWebhooksSection({ projectId }: { projectId: string }) {
                   <button
                     type="button"
                     onClick={() => setHistoryTarget(sub.id)}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity rounded-sm p-0.5 hover:bg-accent"
+                    className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity rounded-sm p-0.5 hover:bg-accent"
+                    aria-label={t(($) => $.webhooks.deliveries.history_button)}
                     title={t(($) => $.webhooks.deliveries.history_button)}
                   >
                     <History className="size-3 text-muted-foreground" />
@@ -91,7 +92,8 @@ export function ProjectWebhooksSection({ projectId }: { projectId: string }) {
                   <button
                     type="button"
                     onClick={() => wh.setDeleteTarget(sub)}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity rounded-sm p-0.5 hover:bg-accent"
+                    className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity rounded-sm p-0.5 hover:bg-accent"
+                    aria-label={t(($) => $.webhooks.delete_label)}
                     title={t(($) => $.webhooks.delete_label)}
                   >
                     <Trash2 className="size-3 text-muted-foreground" />

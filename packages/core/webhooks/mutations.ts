@@ -45,8 +45,10 @@ export function useDeleteWebhookSubscription(projectId?: string) {
 }
 
 // useRedeliverWebhookSubscriptionDelivery re-POSTs a stored payload. The server
-// enqueues it async (202), so the new row appears on the next list refetch —
-// invalidate the subscription's deliveries list on settle.
+// enqueues it async (202) and records the new row only once the worker
+// finishes, so invalidating once on settle can race ahead of that write. We
+// invalidate immediately and again after a short delay so the new delivery row
+// surfaces without a manual reload.
 export function useRedeliverWebhookSubscriptionDelivery(subscriptionId: string) {
   const qc = useQueryClient();
   const wsId = useWorkspaceId();
@@ -54,9 +56,13 @@ export function useRedeliverWebhookSubscriptionDelivery(subscriptionId: string) 
     mutationFn: (deliveryId: string) =>
       api.redeliverWebhookSubscriptionDelivery(subscriptionId, deliveryId),
     onSettled: () => {
-      qc.invalidateQueries({
-        queryKey: webhookKeys.deliveries(wsId, subscriptionId),
-      });
+      const key = webhookKeys.deliveries(wsId, subscriptionId);
+      qc.invalidateQueries({ queryKey: key });
+      // The row is written after the 202 (and a failing endpoint retries for a
+      // few seconds), so refetch again shortly to catch the recorded row.
+      setTimeout(() => {
+        void qc.invalidateQueries({ queryKey: key });
+      }, 3000);
     },
   });
 }

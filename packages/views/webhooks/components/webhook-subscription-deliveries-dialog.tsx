@@ -120,9 +120,10 @@ function DeliveryRow({
   const [open, setOpen] = useState(false);
   const visual = visualForStatus(delivery.status);
   const StatusIcon = visual.icon;
-  const statusLabel =
-    t(($) => $.webhooks.deliveries.status[delivery.status as OutboundWebhookDeliveryStatus]) ??
-    delivery.status;
+  const statusLabel = t(
+    ($) => $.webhooks.deliveries.status[delivery.status as OutboundWebhookDeliveryStatus],
+    { defaultValue: delivery.status },
+  );
 
   return (
     <>
@@ -204,8 +205,10 @@ function DeliveryDetailDialog({
             <div className="flex items-center gap-2">
               <StatusIcon className={cn("h-4 w-4 shrink-0", visual.color)} />
               <span className={cn("text-sm font-medium", visual.color)}>
-                {t(($) => $.webhooks.deliveries.status[full.status as OutboundWebhookDeliveryStatus]) ??
-                  full.status}
+                {t(
+                  ($) => $.webhooks.deliveries.status[full.status as OutboundWebhookDeliveryStatus],
+                  { defaultValue: full.status },
+                )}
               </span>
             </div>
             <code className="rounded bg-muted px-2 py-0.5 text-xs font-mono">
