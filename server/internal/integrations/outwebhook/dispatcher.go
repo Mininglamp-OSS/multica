@@ -488,9 +488,12 @@ func (d *Dispatcher) post(url, event, deliveryID, signature string, body []byte)
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	// Read a bounded prefix so the connection can be reused and the body can be
-	// recorded in the delivery history.
+	// Capture a bounded prefix for the delivery history, then drain whatever
+	// remains so the keep-alive connection can actually be reused (Go only pools
+	// a connection whose body was read to EOF). The drain is bounded by the
+	// request's context timeout, so a slow/huge responder can't wedge the worker.
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxRecordedResponseBody))
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode, respBody, nil
 }
 
