@@ -32,17 +32,21 @@ WHERE id = $1 AND workspace_id = $2;
 -- subscription. Slim projection: request_body / response_body are deliberately
 -- excluded — a page of 4 KiB+ bodies would be pulled from Postgres just to be
 -- dropped in the JSON encoder. Detail views fetch the full row via
--- GetOutboundWebhookDeliveryInWorkspace. `total` is the full unpaged count via a
--- window function, so listing + counting is one round-trip (0 rows → no total,
--- which the handler reads as 0).
+-- GetOutboundWebhookDeliveryInWorkspace.
 SELECT
     id, workspace_id, subscription_id, event, status, attempt_count,
-    response_status, error, redelivered_from_id, created_at,
-    count(*) OVER() AS total
+    response_status, error, redelivered_from_id, created_at
 FROM outbound_webhook_delivery
 WHERE subscription_id = $1 AND workspace_id = $2
 ORDER BY created_at DESC
 LIMIT $3 OFFSET $4;
+
+-- name: CountOutboundWebhookDeliveries :one
+-- Total for pagination. A separate count (not count(*) OVER() on the list) so
+-- the total is correct even when an out-of-range offset returns zero rows, and
+-- so Postgres can satisfy it with the (subscription_id, created_at) index.
+SELECT count(*) FROM outbound_webhook_delivery
+WHERE subscription_id = $1 AND workspace_id = $2;
 
 -- name: PurgeOutboundWebhookDeliveriesOlderThan :exec
 -- TTL cleanup: the scheduled OutboundWebhookDeliveryCleanupJob deletes rows

@@ -165,3 +165,30 @@ func TestRedeliverWebhookSubscriptionDelivery(t *testing.T) {
 		t.Errorf("redelivered_from = %q, want %q", uuidToString(fake.lastFrom), withBodyID)
 	}
 }
+
+func TestRedeliverWebhookSubscriptionDelivery_DisabledRejected(t *testing.T) {
+	t.Cleanup(func() { cleanupWebhookSubscriptions(t) })
+
+	sub := createWebhookForTest(t, map[string]any{"url": "https://example.com/hook"})
+	deliveryID := insertOutboundDelivery(t, sub.ID, "failed", true)
+
+	// Disable the subscription — manual redelivery must not bypass the kill switch.
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE webhook_subscription SET enabled = false WHERE id = $1`, sub.ID); err != nil {
+		t.Fatalf("disable subscription: %v", err)
+	}
+
+	fake := &fakeWebhookRedeliverer{ret: true}
+	testHandler.WebhookDispatcher = fake
+	t.Cleanup(func() { testHandler.WebhookDispatcher = nil })
+
+	req := withURLParams(newRequest("POST", "/x", nil), "id", sub.ID, "deliveryId", deliveryID)
+	w := httptest.NewRecorder()
+	testHandler.RedeliverWebhookSubscriptionDelivery(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("redeliver to disabled subscription should be 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if fake.called {
+		t.Errorf("dispatcher must not be called for a disabled subscription")
+	}
+}

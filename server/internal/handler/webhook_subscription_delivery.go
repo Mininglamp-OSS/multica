@@ -113,11 +113,18 @@ func (h *Handler) ListWebhookSubscriptionDeliveries(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// total comes from the window count on each row; an empty page means 0.
-	var total int64
-	if len(rows) > 0 {
-		total = rows[0].Total
+	// Separate count so the total is correct even for an out-of-range offset
+	// (a window count would report 0 once the page is empty).
+	total, err := h.Queries.CountOutboundWebhookDeliveries(r.Context(), db.CountOutboundWebhookDeliveriesParams{
+		SubscriptionID: sub.ID,
+		WorkspaceID:    sub.WorkspaceID,
+	})
+	if err != nil {
+		slog.Error("count outbound webhook deliveries failed", "error", err, "subscription_id", uuidToString(sub.ID))
+		writeError(w, http.StatusInternalServerError, "failed to list deliveries")
+		return
 	}
+
 	resp := make([]OutboundWebhookDeliveryResponse, len(rows))
 	for i, row := range rows {
 		resp[i] = slimOutboundDeliveryToResponse(row)
@@ -152,6 +159,14 @@ func (h *Handler) RedeliverWebhookSubscriptionDelivery(w http.ResponseWriter, r 
 	}
 	delivery, ok := h.loadOutboundDeliveryForSubscription(w, r, sub)
 	if !ok {
+		return
+	}
+	if !sub.Enabled {
+		// A disabled subscription sends nothing on the automatic path
+		// (ListEnabledWebhookSubscriptionsForDispatch filters on enabled), so
+		// manual redelivery must not be an egress backdoor around the kill
+		// switch. Mirrors the inbound replay's disabled-trigger rejection.
+		writeError(w, http.StatusConflict, "subscription is disabled; enable it before redelivering")
 		return
 	}
 	if len(delivery.RequestBody) == 0 {
