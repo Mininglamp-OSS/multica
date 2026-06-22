@@ -98,7 +98,7 @@ jobs:
         run: cd server && go run ./cmd/migrate up
 
       - name: Test
-        run: cd server && go test ./...
+        run: cd server && go test -race ./...
 
       # The outbound-webhook dispatcher runs worker-pool goroutines; run its
       # packages under the race detector so concurrency regressions are caught
