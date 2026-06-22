@@ -1,9 +1,11 @@
 package outwebhook
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,6 +190,47 @@ func TestDispatcher_ThresholdZeroNeverDisables(t *testing.T) {
 	}
 }
 
+// Regression for the disable-then-in-flight-success race (Jerry-Xin review):
+// if a stale success lands after auto-disable trips, ResetWebhookSubscriptionFailures
+// must NOT zero the counter — that would leave the row in the contradictory
+// state enabled=false + reason=auto_disabled + counter=0. Preserving the
+// post-trip counter keeps the audit honest about why the subscription was
+// disabled.
+func TestDispatcher_ResetSkippedWhenAlreadyAutoDisabled(t *testing.T) {
+	store := &fakeStore{}
+	store.failuresByID = map[string]int32{}
+	store.enabledByID = map[string]bool{}
+	store.disabledReason = map[string]string{}
+	s := sub(t, subID1, "", []string{EventIssueStatusChanged}, "http://example.invalid")
+	key := uuidStr(s.ID)
+	// Simulate post-auto-disable state: enabled=false, counter=20, reason set.
+	store.failuresByID[key] = 20
+	store.enabledByID[key] = false
+	store.disabledReason[key] = "auto_disabled_failure_threshold"
+
+	d := newTestDispatcher(t, store, &http.Client{Timeout: deliveryTimeout})
+
+	// Drive markDelivered directly — simulates the in-flight delivery that
+	// finished a few ms after the disable trip.
+	d.markDelivered(s.ID)
+
+	store.mu.Lock()
+	gotFailures := store.failuresByID[key]
+	gotEnabled := store.enabledByID[key]
+	gotReason := store.disabledReason[key]
+	store.mu.Unlock()
+
+	if gotFailures != 20 {
+		t.Errorf("counter must stay at 20 after stale success; got %d", gotFailures)
+	}
+	if gotEnabled {
+		t.Errorf("enabled must remain false after stale success; subscription must not self-revive")
+	}
+	if gotReason != "auto_disabled_failure_threshold" {
+		t.Errorf("disabled_reason must remain set; got %q", gotReason)
+	}
+}
+
 // TestPush should mark the synthetic payload as TEST-0 / "Multica webhook test
 // push" so the receiver can distinguish test traffic, and it should flow
 // through the normal deliver()/record() path (delivery_history row, signing,
@@ -211,35 +254,27 @@ func TestDispatcher_TestPushDeliversSyntheticPayload(t *testing.T) {
 	// The synthetic body must carry the TEST-0 marker; operators reading
 	// delivery history rely on this to tell test pushes from real events.
 	body := string(recs[0].RequestBody)
-	if !contains(body, `"identifier":"TEST-0"`) || !contains(body, `"webhook-test"`) {
+	if !strings.Contains(body, `"identifier":"TEST-0"`) || !strings.Contains(body, `"webhook-test"`) {
 		t.Errorf("test push body missing test markers: %s", body)
 	}
 }
 
 func TestDispatcher_TestPushAfterCloseReturnsFalse(t *testing.T) {
 	// Once shutdown begins, TestPush must reject — mirrors Redeliver's
-	// guard against sending on closed channels.
+	// guard against sending on closed channels. Use the public Close()
+	// lifecycle so worker goroutines actually drain rather than leaking
+	// until process exit (Jerry-Xin review).
 	store := &fakeStore{}
 	d := newWithClient(store, &http.Client{Timeout: deliveryTimeout})
 	d.retryBackoff = []time.Duration{1 * time.Millisecond, 1 * time.Millisecond}
-	close(d.stopDispatch) // simulate shutdown without draining
-	defer func() {
-		// Re-init stopDeliver so Close doesn't double-close stopDispatch.
-		d.closeOnce.Do(func() {})
-	}()
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := d.Close(closeCtx); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
 
 	if ok := d.TestPush(sub(t, subID1, "", []string{EventIssueStatusChanged}, "http://x")); ok {
-		t.Errorf("TestPush should refuse after stopDispatch is closed")
+		t.Errorf("TestPush should refuse after Close")
 	}
-}
-
-// contains is a tiny strings.Contains alias to keep the import surface narrow
-// (this file's only consumer of strings.Contains is the body assertion above).
-func contains(haystack, needle string) bool {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
 }

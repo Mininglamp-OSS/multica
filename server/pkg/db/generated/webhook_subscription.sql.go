@@ -274,12 +274,28 @@ func (q *Queries) ListWebhookSubscriptionsByWorkspace(ctx context.Context, works
 
 const resetWebhookSubscriptionFailures = `-- name: ResetWebhookSubscriptionFailures :exec
 UPDATE webhook_subscription
-SET consecutive_failures = 0
-WHERE id = $1 AND consecutive_failures > 0
+SET consecutive_failures = 0,
+    updated_at = now()
+WHERE id = $1 AND consecutive_failures > 0 AND enabled = true
 `
 
 // Called after a successful delivery. WHERE consecutive_failures > 0 keeps the
 // happy path (which always succeeds) from issuing a no-op UPDATE per delivery.
+//
+// WHERE enabled = true is a tie-break for the disable-then-in-flight-success
+// race: if delivery A fails to trip the threshold (enabled→false) while
+// delivery B is still in flight and then succeeds, we must NOT reset the
+// counter on B's recovery — that would leave the row in the confusing state
+// enabled=false + disabled_reason='auto_disabled' + consecutive_failures=0
+// where the failure count contradicts the disable reason (Jerry-Xin review).
+// Preserving the count as-is keeps the audit trail honest ("we disabled at
+// exactly N failures"); operator re-enable will zero both via the update
+// query below.
+//
+// We also bump updated_at so the row reflects the moment of recovery for
+// the UI/audit (the no-op guard above means this only fires on genuine
+// state change, so the per-row write rate is bounded by recovery events,
+// not delivery volume).
 func (q *Queries) ResetWebhookSubscriptionFailures(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, resetWebhookSubscriptionFailures, id)
 	return err

@@ -57,9 +57,18 @@ func (f *fakeStore) ResetWebhookSubscriptionFailures(_ context.Context, id pgtyp
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resetCalls = append(f.resetCalls, id)
-	if f.failuresByID != nil {
-		f.failuresByID[util.UUIDToString(id)] = 0
+	if f.failuresByID == nil {
+		return nil
 	}
+	// Mirror the SQL: only reset when the subscription is still enabled. A
+	// stale in-flight success against an already-auto-disabled subscription
+	// must not zero the counter (would leave enabled=false + reason=… +
+	// counter=0, contradicting itself — Jerry-Xin review).
+	key := util.UUIDToString(id)
+	if enabled, ok := f.enabledByID[key]; ok && !enabled {
+		return nil
+	}
+	f.failuresByID[key] = 0
 	return nil
 }
 

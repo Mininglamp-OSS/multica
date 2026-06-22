@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -44,15 +43,4 @@ func parseUUIDForTest(t *testing.T, s string) pgtype.UUID {
 		t.Fatalf("parse uuid %q: %v", s, err)
 	}
 	return u
-}
-
-// ensureDispatcherIsHealthy guards against the dispatcher silently going
-// away mid-test (Close, etc) so a hung TestPush surfaces as a real error.
-func ensureDispatcherIsHealthy(t *testing.T, d *Dispatcher) {
-	t.Helper()
-	select {
-	case <-d.stopDispatch:
-		t.Fatal("dispatcher already stopped before test push")
-	case <-time.After(10 * time.Millisecond):
-	}
 }
