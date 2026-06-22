@@ -12,17 +12,27 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// fakeWebhookRedeliverer captures Redeliver calls for the redeliver handler test.
+// fakeWebhookRedeliverer captures Redeliver / TestPush calls for the
+// redeliver + test-push handler tests.
 type fakeWebhookRedeliverer struct {
-	called   bool
-	ret      bool
-	lastFrom pgtype.UUID
+	called       bool
+	ret          bool
+	lastFrom     pgtype.UUID
+	testCalled   bool
+	testRet      bool
+	testCallSubs []db.WebhookSubscription
 }
 
 func (f *fakeWebhookRedeliverer) Redeliver(_ db.WebhookSubscription, _ string, _ []byte, fromID pgtype.UUID) bool {
 	f.called = true
 	f.lastFrom = fromID
 	return f.ret
+}
+
+func (f *fakeWebhookRedeliverer) TestPush(sub db.WebhookSubscription) bool {
+	f.testCalled = true
+	f.testCallSubs = append(f.testCallSubs, sub)
+	return f.testRet
 }
 
 // insertOutboundDelivery seeds a delivery row for subID and returns its id.

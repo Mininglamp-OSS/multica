@@ -19,6 +19,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +81,13 @@ var defaultRetryBackoff = []time.Duration{1 * time.Second, 4 * time.Second}
 type Store interface {
 	ListEnabledWebhookSubscriptionsForDispatch(ctx context.Context, workspaceID pgtype.UUID) ([]db.WebhookSubscription, error)
 	CreateOutboundWebhookDelivery(ctx context.Context, arg db.CreateOutboundWebhookDeliveryParams) (db.OutboundWebhookDelivery, error)
+	// Failure-tracking writes (#38). The dispatcher updates these on every
+	// terminal delivery outcome; the queries are scoped to a single subscription
+	// id (workspace scoping is enforced at the API layer where the row was
+	// loaded). Both are best-effort: a failed write is logged, never
+	// propagated to break delivery.
+	ResetWebhookSubscriptionFailures(ctx context.Context, id pgtype.UUID) error
+	IncrementWebhookSubscriptionFailuresAndMaybeDisable(ctx context.Context, arg db.IncrementWebhookSubscriptionFailuresAndMaybeDisableParams) (db.IncrementWebhookSubscriptionFailuresAndMaybeDisableRow, error)
 }
 
 // recordTimeout bounds the best-effort delivery-history write so a slow DB can
@@ -89,6 +98,25 @@ const recordTimeout = 5 * time.Second
 // post() reader already limits what it reads from the wire; this is the storage
 // cap (matches that 4 KiB limit).
 const maxRecordedResponseBody = 4096
+
+// Auto-disable on repeated failures (#38). After defaultAutoDisableThreshold
+// consecutive terminal failures (non-retryable 4xx, or retries exhausted),
+// the dispatcher flips the subscription's enabled flag to false and stamps
+// disabled_reason='auto_disabled_failure_threshold' — operators see "system
+// disabled" in the UI and must re-enable to resume delivery. Operator
+// re-enable (via PATCH … {enabled:true}) clears both columns at the SQL
+// layer, so the next failure window starts fresh rather than instantly
+// re-tripping.
+//
+// Threshold rationale: ~20 corresponds to roughly an hour of an issue-heavy
+// workspace's traffic, or about a day of a quiet one. Lower trips a single
+// receiver hiccup into "disabled"; higher pays for too many useless attempts
+// against a broken endpoint. Tunable via env; 0 disables auto-disable entirely
+// for deployments that prefer manual control.
+const (
+	envAutoDisableThreshold     = "DM_OUTBOUND_WEBHOOK_AUTO_DISABLE_THRESHOLD"
+	defaultAutoDisableThreshold = 20
+)
 
 // deliverJob is one queued delivery: a subscription + the marshaled body shared
 // (read-only) across retries. event identifies the payload's event type.
@@ -384,6 +412,7 @@ func (d *Dispatcher) deliver(job deliverJob) {
 			slog.Debug("outwebhook: delivered",
 				"subscription_id", subID, "event", job.event, "status", status, "attempt", attempts)
 			d.record(job, "delivered", attempts, status, lastBody, nil)
+			d.markDelivered(sub.ID)
 			return
 		}
 
@@ -394,12 +423,14 @@ func (d *Dispatcher) deliver(job deliverJob) {
 			"status", status, "attempt", attempts, "retryable", retryable, "error", redactErr(err))
 		if !retryable {
 			d.record(job, "failed", attempts, status, lastBody, err) // 4xx — endpoint rejected the payload.
+			d.markFailed(sub.ID, host)
 			return
 		}
 	}
 	slog.Error("outwebhook: delivery exhausted retries",
 		"subscription_id", subID, "event", job.event, "host", host)
 	d.record(job, "failed", attempts, lastStatus, lastBody, lastErr)
+	d.markFailed(sub.ID, host)
 }
 
 // record writes one delivery-history row for a terminal outcome. Best-effort: a
@@ -523,4 +554,125 @@ func subscribedToEvent(sub db.WebhookSubscription, event string) bool {
 		}
 	}
 	return false
+}
+
+// autoDisableThreshold reads DM_OUTBOUND_WEBHOOK_AUTO_DISABLE_THRESHOLD (or
+// returns the default), capping the number of consecutive terminal failures a
+// subscription may accumulate before the dispatcher flips it to enabled=false.
+// 0 or a negative value disables the feature: failures still count but the
+// subscription stays enabled. Read per call so a runtime env edit (via process
+// supervisor) takes effect on the next failure without a restart.
+func autoDisableThreshold() int {
+	if v := os.Getenv(envAutoDisableThreshold); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return defaultAutoDisableThreshold
+}
+
+// markDelivered clears the consecutive-failure counter after a successful
+// delivery. The SQL guards with WHERE consecutive_failures > 0 so the happy
+// path (always-succeeding subscription) never issues a no-op UPDATE — read-
+// only when the counter is already zero, ~one UPDATE for the rare recovery.
+// Best-effort: a failed write logs and returns; the delivery itself succeeded
+// and we will not re-deliver to fix bookkeeping.
+func (d *Dispatcher) markDelivered(subID pgtype.UUID) {
+	ctx, cancel := context.WithTimeout(context.Background(), recordTimeout)
+	defer cancel()
+	if err := d.store.ResetWebhookSubscriptionFailures(ctx, subID); err != nil {
+		slog.Warn("outwebhook: reset failure counter failed",
+			"subscription_id", util.UUIDToString(subID), "error", err)
+	}
+}
+
+// markFailed increments the consecutive-failure counter and, in the same
+// UPDATE, flips enabled to false + stamps disabled_reason when the new value
+// crosses the auto-disable threshold (envAutoDisableThreshold). Logs at INFO
+// the first time auto-disable trips for a subscription so operators see a
+// clear "system disabled" event in the log stream, separate from per-delivery
+// failure warnings. Best-effort: a failed write logs and moves on.
+func (d *Dispatcher) markFailed(subID pgtype.UUID, host string) {
+	threshold := autoDisableThreshold()
+	ctx, cancel := context.WithTimeout(context.Background(), recordTimeout)
+	defer cancel()
+	row, err := d.store.IncrementWebhookSubscriptionFailuresAndMaybeDisable(ctx,
+		db.IncrementWebhookSubscriptionFailuresAndMaybeDisableParams{
+			ID:        subID,
+			Threshold: int32(threshold),
+		})
+	if err != nil {
+		slog.Warn("outwebhook: increment failure counter failed",
+			"subscription_id", util.UUIDToString(subID), "error", err)
+		return
+	}
+	// row.Enabled is the post-update state. If the trip happened on this call,
+	// the UPDATE used the new (incremented) counter against the threshold and
+	// returned enabled=false. Subsequent failures on an already-disabled
+	// subscription return enabled=false too — but the dispatch hot path filters
+	// on enabled, so a disabled subscription cannot enqueue further deliveries
+	// except via Redeliver (which itself rejects disabled subs at the API).
+	if !row.Enabled && row.DisabledReason.Valid && row.DisabledReason.String == "auto_disabled_failure_threshold" {
+		// Log only when the counter equals threshold — that's the moment of
+		// transition, not every subsequent failure that found it already off.
+		if int(row.ConsecutiveFailures) == threshold {
+			slog.Info("outwebhook: subscription auto-disabled after consecutive failures",
+				"subscription_id", util.UUIDToString(subID),
+				"host", host,
+				"threshold", threshold,
+				"consecutive_failures", row.ConsecutiveFailures)
+		}
+	}
+}
+
+// TestPush enqueues a one-off synthetic delivery against the given
+// subscription, bypassing the event bus and subscription filter. Used by the
+// /api/webhook-subscriptions/{id}/test endpoint to let an operator dry-run a
+// freshly configured subscription against its receiver.
+//
+// The synthetic envelope is an issue.status_changed payload with a clearly
+// fake issue (identifier "TEST-0", title "Multica webhook test push"). It
+// runs through the normal deliver() path — same signing, same retries, same
+// record() row, same failure-counter bookkeeping — so the operator sees the
+// test in delivery history alongside real traffic and any auth/URL/firewall
+// problem surfaces the same way it would in production.
+//
+// The caller is responsible for gating (owner/admin) and for rejecting
+// disabled subscriptions at the API layer (mirrors Redeliver) — TestPush
+// itself does not enforce either, so subscription edit forms can preview a
+// test push using the post-edit row before the database is touched.
+//
+// Returns false if the delivery queue is full (transient back-pressure; the
+// operator can retry).
+func (d *Dispatcher) TestPush(sub db.WebhookSubscription) bool {
+	body, err := json.Marshal(outboundPayload{
+		Event:       EventIssueStatusChanged,
+		WorkspaceID: util.UUIDToString(sub.WorkspaceID),
+		Actor:       actorPayload{Type: "system", ID: "webhook-test"},
+		Issue: map[string]any{
+			"identifier": "TEST-0",
+			"title":      "Multica webhook test push",
+			"status":     "in_progress",
+		},
+		PreviousStatus: "todo",
+		DeliveredAt:    time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		slog.Error("outwebhook: failed to marshal test payload",
+			"subscription_id", util.UUIDToString(sub.ID), "error", err)
+		return false
+	}
+	select {
+	case <-d.stopDispatch:
+		return false
+	default:
+	}
+	select {
+	case d.jobs <- deliverJob{sub: sub, event: EventIssueStatusChanged, body: body}:
+		return true
+	default:
+		slog.Warn("outwebhook: delivery queue full, dropping test push",
+			"subscription_id", util.UUIDToString(sub.ID), "host", hostOf(sub.Url))
+		return false
+	}
 }

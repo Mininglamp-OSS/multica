@@ -60,8 +60,19 @@ type WebhookSubscriptionResponse struct {
 	// SecretOnce is the full signing secret, populated only in the create
 	// response. Empty on list/get.
 	SecretOnce string `json:"secret,omitempty"`
-	CreatedAt  string `json:"created_at"`
-	UpdatedAt  string `json:"updated_at"`
+	// ConsecutiveFailures is the number of terminal failed deliveries since
+	// the last delivered one. Auto-disable trips at the configured threshold
+	// (#38); exposed so the UI can render a "this subscription is at N/M
+	// failures" hint before it flips. Resets to 0 on a successful delivery,
+	// also reset when an operator re-enables.
+	ConsecutiveFailures int32 `json:"consecutive_failures"`
+	// DisabledReason is "auto_disabled_failure_threshold" when the system
+	// flipped enabled→false; empty when the operator disabled it themselves
+	// (or it has never been disabled). UI uses this to render "Disabled by
+	// system" vs "Disabled".
+	DisabledReason *string `json:"disabled_reason"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
 }
 
 func webhookSubscriptionToResponse(s db.WebhookSubscription) WebhookSubscriptionResponse {
@@ -70,15 +81,17 @@ func webhookSubscriptionToResponse(s db.WebhookSubscription) WebhookSubscription
 		events = []string{}
 	}
 	resp := WebhookSubscriptionResponse{
-		ID:          uuidToString(s.ID),
-		WorkspaceID: uuidToString(s.WorkspaceID),
-		ProjectID:   uuidToPtr(s.ProjectID),
-		URL:         s.Url,
-		Events:      events,
-		Enabled:     s.Enabled,
-		SecretHint:  secretHint(s.Secret),
-		CreatedAt:   timestampToString(s.CreatedAt),
-		UpdatedAt:   timestampToString(s.UpdatedAt),
+		ID:                  uuidToString(s.ID),
+		WorkspaceID:         uuidToString(s.WorkspaceID),
+		ProjectID:           uuidToPtr(s.ProjectID),
+		URL:                 s.Url,
+		Events:              events,
+		Enabled:             s.Enabled,
+		SecretHint:          secretHint(s.Secret),
+		ConsecutiveFailures: s.ConsecutiveFailures,
+		DisabledReason:      textToPtr(s.DisabledReason),
+		CreatedAt:           timestampToString(s.CreatedAt),
+		UpdatedAt:           timestampToString(s.UpdatedAt),
 	}
 	return resp
 }
@@ -375,4 +388,35 @@ func (h *Handler) loadWebhookSubscription(w http.ResponseWriter, r *http.Request
 		return db.WebhookSubscription{}, false
 	}
 	return sub, true
+}
+
+// TestWebhookSubscription enqueues a one-off synthetic delivery against the
+// subscription so an operator can dry-run a freshly configured webhook against
+// its receiver without waiting for a real issue status change. The synthetic
+// payload uses identifier "TEST-0" / title "Multica webhook test push" so the
+// receiver can clearly tell test traffic from real events; the delivery flows
+// through the normal dispatcher (signing, retries, history row), so any
+// problem surfaces the same way it would in production.
+//
+// Mirrors RedeliverWebhookSubscriptionDelivery's contract: owner/admin gated,
+// rejects a disabled subscription (kill switch is authoritative), returns 202
+// with the new delivery's lineage left unset (it's not a redelivery).
+func (h *Handler) TestWebhookSubscription(w http.ResponseWriter, r *http.Request) {
+	sub, ok := h.loadWebhookSubscription(w, r)
+	if !ok {
+		return
+	}
+	if !sub.Enabled {
+		writeError(w, http.StatusConflict, "subscription is disabled; enable it before sending a test push")
+		return
+	}
+	if h.WebhookDispatcher == nil {
+		writeError(w, http.StatusServiceUnavailable, "webhook delivery is not available")
+		return
+	}
+	if !h.WebhookDispatcher.TestPush(sub) {
+		writeError(w, http.StatusServiceUnavailable, "delivery queue is full, try again shortly")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued"})
 }

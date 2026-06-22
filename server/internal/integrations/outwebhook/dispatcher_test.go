@@ -24,13 +24,22 @@ import (
 // fakeStore returns a fixed subscription list, ignoring the workspace filter
 // (the dispatcher does the workspace-level vs project-level filtering itself).
 // It also captures recorded delivery rows so tests can assert the dispatcher
-// persists the terminal outcome.
+// persists the terminal outcome, plus the failure-counter bookkeeping calls
+// (#38) so tests can assert reset/increment semantics.
 type fakeStore struct {
 	subs []db.WebhookSubscription
 	err  error
 
 	mu        sync.Mutex
 	delivered []db.CreateOutboundWebhookDeliveryParams
+	// Failure-tracking observations: each call records the subscription id
+	// it touched. failuresByID is the simulated counter; the increment query
+	// returns the post-update value, gated by threshold.
+	resetCalls     []pgtype.UUID
+	increments     []db.IncrementWebhookSubscriptionFailuresAndMaybeDisableParams
+	failuresByID   map[string]int32
+	enabledByID    map[string]bool
+	disabledReason map[string]string
 }
 
 func (f *fakeStore) ListEnabledWebhookSubscriptionsForDispatch(_ context.Context, _ pgtype.UUID) ([]db.WebhookSubscription, error) {
@@ -44,11 +53,76 @@ func (f *fakeStore) CreateOutboundWebhookDelivery(_ context.Context, arg db.Crea
 	return db.OutboundWebhookDelivery{}, nil
 }
 
+func (f *fakeStore) ResetWebhookSubscriptionFailures(_ context.Context, id pgtype.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resetCalls = append(f.resetCalls, id)
+	if f.failuresByID == nil {
+		return nil
+	}
+	// Mirror the SQL: only reset when the subscription is still enabled. A
+	// stale in-flight success against an already-auto-disabled subscription
+	// must not zero the counter (would leave enabled=false + reason=… +
+	// counter=0, contradicting itself — Jerry-Xin review).
+	key := util.UUIDToString(id)
+	if enabled, ok := f.enabledByID[key]; ok && !enabled {
+		return nil
+	}
+	f.failuresByID[key] = 0
+	return nil
+}
+
+func (f *fakeStore) IncrementWebhookSubscriptionFailuresAndMaybeDisable(_ context.Context, arg db.IncrementWebhookSubscriptionFailuresAndMaybeDisableParams) (db.IncrementWebhookSubscriptionFailuresAndMaybeDisableRow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.increments = append(f.increments, arg)
+	if f.failuresByID == nil {
+		f.failuresByID = map[string]int32{}
+	}
+	if f.enabledByID == nil {
+		f.enabledByID = map[string]bool{}
+	}
+	if f.disabledReason == nil {
+		f.disabledReason = map[string]string{}
+	}
+	key := util.UUIDToString(arg.ID)
+	f.failuresByID[key]++
+	// Initialise enabled=true on first sight (matches the DB default).
+	if _, ok := f.enabledByID[key]; !ok {
+		f.enabledByID[key] = true
+	}
+	if arg.Threshold > 0 && f.failuresByID[key] >= arg.Threshold && f.enabledByID[key] {
+		f.enabledByID[key] = false
+		f.disabledReason[key] = "auto_disabled_failure_threshold"
+	}
+	row := db.IncrementWebhookSubscriptionFailuresAndMaybeDisableRow{
+		Enabled:             f.enabledByID[key],
+		ConsecutiveFailures: f.failuresByID[key],
+	}
+	if reason, ok := f.disabledReason[key]; ok {
+		row.DisabledReason = pgtype.Text{String: reason, Valid: true}
+	}
+	return row, nil
+}
+
 // records returns a copy of the captured delivery rows.
 func (f *fakeStore) records() []db.CreateOutboundWebhookDeliveryParams {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]db.CreateOutboundWebhookDeliveryParams(nil), f.delivered...)
+}
+
+// resetCount / incrementCount expose the counters for failure-tracking assertions.
+func (f *fakeStore) resetCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.resetCalls)
+}
+
+func (f *fakeStore) incrementParams() []db.IncrementWebhookSubscriptionFailuresAndMaybeDisableParams {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]db.IncrementWebhookSubscriptionFailuresAndMaybeDisableParams(nil), f.increments...)
 }
 
 // newTestDispatcher builds a dispatcher with a fast retry backoff and registers
