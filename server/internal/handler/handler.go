@@ -92,12 +92,17 @@ type cloudRuntimeProxy interface {
 	Do(ctx context.Context, req cloudruntime.Request) (*cloudruntime.Response, error)
 }
 
+type RuntimeProfileRefreshNotifier interface {
+	NotifyRuntimeProfilesChanged(workspaceID, profileID string)
+}
+
 type Handler struct {
 	Queries               *db.Queries
 	DB                    dbExecutor
 	TxStarter             txStarter
 	Hub                   *realtime.Hub
 	DaemonHub             *daemonws.Hub
+	DaemonProfileRefresh  RuntimeProfileRefreshNotifier
 	Bus                   *events.Bus
 	TaskService           *service.TaskService
 	IssueService          *service.IssueService
@@ -205,6 +210,10 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	if len(daemonHubs) > 0 {
 		daemonHub = daemonHubs[0]
 	}
+	var daemonProfileRefresh RuntimeProfileRefreshNotifier
+	if daemonHub != nil {
+		daemonProfileRefresh = daemonHub
+	}
 
 	taskSvc := service.NewTaskService(queries, txStarter, hub, bus, daemonHub)
 	taskSvc.Analytics = analyticsClient
@@ -214,6 +223,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		TxStarter:             txStarter,
 		Hub:                   hub,
 		DaemonHub:             daemonHub,
+		DaemonProfileRefresh:  daemonProfileRefresh,
 		Bus:                   bus,
 		TaskService:           taskSvc,
 		IssueService:          service.NewIssueService(queries, txStarter, bus, analyticsClient, taskSvc),
@@ -242,6 +252,24 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// writeMeasuredJSON behaves like writeJSON but returns the encoded body size so
+// callers can record payload bytes in slow-endpoint diagnostics. It measures the
+// uncompressed JSON length and is unrelated to transport compression.
+func writeMeasuredJSON(w http.ResponseWriter, status int, v any) (int, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode response")
+		return 0, err
+	}
+	body = append(body, '\n')
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if _, err := w.Write(body); err != nil {
+		return len(body), err
+	}
+	return len(body), nil
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
