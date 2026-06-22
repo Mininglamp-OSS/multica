@@ -16,7 +16,7 @@ INSERT INTO webhook_subscription (
     workspace_id, project_id, url, secret, events, enabled
 ) VALUES (
     $1, $6, $2, $3, $4, $5
-) RETURNING id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at
+) RETURNING id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at, consecutive_failures, disabled_reason
 `
 
 type CreateWebhookSubscriptionParams struct {
@@ -48,6 +48,8 @@ func (q *Queries) CreateWebhookSubscription(ctx context.Context, arg CreateWebho
 		&i.Enabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ConsecutiveFailures,
+		&i.DisabledReason,
 	)
 	return i, err
 }
@@ -68,7 +70,7 @@ func (q *Queries) DeleteWebhookSubscription(ctx context.Context, arg DeleteWebho
 }
 
 const getWebhookSubscriptionInWorkspace = `-- name: GetWebhookSubscriptionInWorkspace :one
-SELECT id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at FROM webhook_subscription
+SELECT id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at, consecutive_failures, disabled_reason FROM webhook_subscription
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -90,12 +92,58 @@ func (q *Queries) GetWebhookSubscriptionInWorkspace(ctx context.Context, arg Get
 		&i.Enabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ConsecutiveFailures,
+		&i.DisabledReason,
 	)
 	return i, err
 }
 
+const incrementWebhookSubscriptionFailuresAndMaybeDisable = `-- name: IncrementWebhookSubscriptionFailuresAndMaybeDisable :one
+UPDATE webhook_subscription
+SET
+    consecutive_failures = consecutive_failures + 1,
+    enabled = CASE
+        WHEN $2::int > 0 AND consecutive_failures + 1 >= $2::int
+            THEN false
+        ELSE enabled
+    END,
+    disabled_reason = CASE
+        WHEN $2::int > 0 AND consecutive_failures + 1 >= $2::int AND enabled
+            THEN 'auto_disabled_failure_threshold'
+        ELSE disabled_reason
+    END,
+    updated_at = now()
+WHERE id = $1
+RETURNING enabled, consecutive_failures, disabled_reason
+`
+
+type IncrementWebhookSubscriptionFailuresAndMaybeDisableParams struct {
+	ID        pgtype.UUID `json:"id"`
+	Threshold int32       `json:"threshold"`
+}
+
+type IncrementWebhookSubscriptionFailuresAndMaybeDisableRow struct {
+	Enabled             bool        `json:"enabled"`
+	ConsecutiveFailures int32       `json:"consecutive_failures"`
+	DisabledReason      pgtype.Text `json:"disabled_reason"`
+}
+
+// Called after a terminal failed delivery. Increments the counter and, if the
+// new value crosses @threshold (set 0 to disable auto-disable), flips enabled
+// to false in the same UPDATE so we never publish an interim enabled+counter
+// state another transaction could race against.
+//
+// Returns the post-update enabled flag + counter so the caller can log "the
+// threshold tripped" without an extra SELECT.
+func (q *Queries) IncrementWebhookSubscriptionFailuresAndMaybeDisable(ctx context.Context, arg IncrementWebhookSubscriptionFailuresAndMaybeDisableParams) (IncrementWebhookSubscriptionFailuresAndMaybeDisableRow, error) {
+	row := q.db.QueryRow(ctx, incrementWebhookSubscriptionFailuresAndMaybeDisable, arg.ID, arg.Threshold)
+	var i IncrementWebhookSubscriptionFailuresAndMaybeDisableRow
+	err := row.Scan(&i.Enabled, &i.ConsecutiveFailures, &i.DisabledReason)
+	return i, err
+}
+
 const listEnabledWebhookSubscriptionsForDispatch = `-- name: ListEnabledWebhookSubscriptionsForDispatch :many
-SELECT id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at FROM webhook_subscription
+SELECT id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at, consecutive_failures, disabled_reason FROM webhook_subscription
 WHERE workspace_id = $1 AND enabled = true
 `
 
@@ -121,6 +169,8 @@ func (q *Queries) ListEnabledWebhookSubscriptionsForDispatch(ctx context.Context
 			&i.Enabled,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ConsecutiveFailures,
+			&i.DisabledReason,
 		); err != nil {
 			return nil, err
 		}
@@ -133,7 +183,7 @@ func (q *Queries) ListEnabledWebhookSubscriptionsForDispatch(ctx context.Context
 }
 
 const listWebhookSubscriptionsByProject = `-- name: ListWebhookSubscriptionsByProject :many
-SELECT id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at FROM webhook_subscription
+SELECT id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at, consecutive_failures, disabled_reason FROM webhook_subscription
 WHERE workspace_id = $1 AND project_id = $2
 ORDER BY created_at DESC
 `
@@ -163,6 +213,8 @@ func (q *Queries) ListWebhookSubscriptionsByProject(ctx context.Context, arg Lis
 			&i.Enabled,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ConsecutiveFailures,
+			&i.DisabledReason,
 		); err != nil {
 			return nil, err
 		}
@@ -176,7 +228,7 @@ func (q *Queries) ListWebhookSubscriptionsByProject(ctx context.Context, arg Lis
 
 const listWebhookSubscriptionsByWorkspace = `-- name: ListWebhookSubscriptionsByWorkspace :many
 
-SELECT id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at FROM webhook_subscription
+SELECT id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at, consecutive_failures, disabled_reason FROM webhook_subscription
 WHERE workspace_id = $1 AND project_id IS NULL
 ORDER BY created_at DESC
 `
@@ -207,6 +259,8 @@ func (q *Queries) ListWebhookSubscriptionsByWorkspace(ctx context.Context, works
 			&i.Enabled,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ConsecutiveFailures,
+			&i.DisabledReason,
 		); err != nil {
 			return nil, err
 		}
@@ -218,14 +272,38 @@ func (q *Queries) ListWebhookSubscriptionsByWorkspace(ctx context.Context, works
 	return items, nil
 }
 
+const resetWebhookSubscriptionFailures = `-- name: ResetWebhookSubscriptionFailures :exec
+UPDATE webhook_subscription
+SET consecutive_failures = 0
+WHERE id = $1 AND consecutive_failures > 0
+`
+
+// Called after a successful delivery. WHERE consecutive_failures > 0 keeps the
+// happy path (which always succeeds) from issuing a no-op UPDATE per delivery.
+func (q *Queries) ResetWebhookSubscriptionFailures(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, resetWebhookSubscriptionFailures, id)
+	return err
+}
+
 const updateWebhookSubscription = `-- name: UpdateWebhookSubscription :one
 UPDATE webhook_subscription SET
     url = COALESCE($3, url),
     events = COALESCE($4, events),
     enabled = COALESCE($5, enabled),
+    -- Operator re-enabling a subscription clears the system-set disable marker
+    -- and zeroes the failure counter, so the next failure window starts fresh
+    -- rather than instantly tripping the auto-disable threshold again.
+    disabled_reason = CASE
+        WHEN $5::boolean IS TRUE THEN NULL
+        ELSE disabled_reason
+    END,
+    consecutive_failures = CASE
+        WHEN $5::boolean IS TRUE THEN 0
+        ELSE consecutive_failures
+    END,
     updated_at = now()
 WHERE id = $1 AND workspace_id = $2
-RETURNING id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at
+RETURNING id, workspace_id, project_id, url, secret, events, enabled, created_at, updated_at, consecutive_failures, disabled_reason
 `
 
 type UpdateWebhookSubscriptionParams struct {
@@ -255,6 +333,8 @@ func (q *Queries) UpdateWebhookSubscription(ctx context.Context, arg UpdateWebho
 		&i.Enabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ConsecutiveFailures,
+		&i.DisabledReason,
 	)
 	return i, err
 }

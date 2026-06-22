@@ -173,11 +173,13 @@ type Handler struct {
 }
 
 // WebhookRedeliverer re-POSTs a stored outbound webhook payload to a
-// subscription's current endpoint. Satisfied by *outwebhook.Dispatcher; an
-// interface so the handler package does not import outwebhook. Returns false
-// when the delivery queue is full (transient back-pressure).
+// subscription's current endpoint, and triggers a synthetic test push.
+// Satisfied by *outwebhook.Dispatcher; an interface so the handler package
+// does not import outwebhook. Returns false when the delivery queue is full
+// (transient back-pressure).
 type WebhookRedeliverer interface {
 	Redeliver(sub db.WebhookSubscription, event string, body []byte, fromID pgtype.UUID) bool
+	TestPush(sub db.WebhookSubscription) bool
 }
 
 func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {
