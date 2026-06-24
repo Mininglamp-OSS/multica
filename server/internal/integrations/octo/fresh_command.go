@@ -18,8 +18,10 @@ type FreshSessionCommand struct {
 // line can carry a command. Leading blank lines are skipped so a forwarded
 // or padded message still parses.
 //
-// Mirrors the Lark equivalent (server/internal/integrations/lark/fresh_command.go)
-// so the two integrations stay product-identical on this directive.
+// The body is expected to ALREADY have the bot's own @mention stripped (Octo
+// inlines mentions as visible text; the hub uses stripBotMentions before
+// constructing InboundMessage). Mirrors the Lark equivalent's parse semantics
+// (server/internal/integrations/lark/fresh_command.go).
 func parseFreshSessionCommand(body string) (*FreshSessionCommand, bool) {
 	lines := strings.Split(body, "\n")
 

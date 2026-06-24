@@ -432,11 +432,10 @@ func TestHandle_EmptyMessageID_SkipsDedup(t *testing.T) {
 	}
 }
 
-// /new directive: the first-line command must be stripped from the persisted
-// chat_message body (the agent never sees the command itself) AND
+// /new directive (DM path): the first-line command must be stripped from the
+// persisted chat_message body (the agent never sees the command itself) AND
 // EnqueueChatTask must receive forceFreshSession=true so the daemon skips
-// prior chat-session resume for this dispatch. Without both, /new is either
-// echoed back as user content or silently downgraded to a normal turn.
+// prior chat-session resume for this dispatch.
 func TestHandle_NewCommand_StripsAndForcesFreshSession(t *testing.T) {
 	q := &fakeQueries{
 		inst:    activeInstallation(),
@@ -464,8 +463,46 @@ func TestHandle_NewCommand_StripsAndForcesFreshSession(t *testing.T) {
 	}
 }
 
+// /new directive (group path, post-strip): a group inbound message whose body
+// has had the bot mention stripped upstream by the hub (see
+// stripBotMentions / hub.go) must reach the dispatcher with "/new …" at the
+// front and produce the same outcome as the DM case. The previous attempt
+// (#44) parsed an un-stripped Body, so groups silently no-oped; this test
+// pins the post-strip contract the dispatcher relies on.
+func TestHandle_GroupNewCommand_AfterHubStrip_ForcesFreshSession(t *testing.T) {
+	q := &fakeQueries{
+		inst:    activeInstallation(),
+		binding: boundUser(),
+	}
+	c := &fakeChat{session: db.ChatSession{ID: validUUID(0x22)}, appendResult: AppendResult{DedupMarked: true}}
+	e := &fakeEnqueuer{task: db.AgentTaskQueue{ID: validUUID(0x33)}}
+	d := newDispatcher(q, c, e, &fakeAudit{})
+
+	msg := dmMessage()
+	msg.ChannelType = ChannelGroup
+	msg.AddressedToBot = true
+	// What the hub hands the dispatcher AFTER stripBotMentions has removed
+	// the leading "@<bot> ". Without that strip, this body would still read
+	// "@<bot> /new restart" and the prefix match would silently fail.
+	msg.Body = "/new restart"
+
+	res, err := d.Handle(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if res.Outcome != OutcomeIngested {
+		t.Fatalf("got %q, want ingested", res.Outcome)
+	}
+	if c.appendParams.Body != "restart" {
+		t.Errorf("AppendUserMessage Body = %q, want %q (group /new must persist the post-command tail only)", c.appendParams.Body, "restart")
+	}
+	if !e.forceFresh {
+		t.Errorf("expected EnqueueChatTask to receive forceFreshSession=true after group /new")
+	}
+}
+
 // A normal message (no /new) MUST NOT set forceFreshSession — the regression
-// the previous test guards against has a mirror: silently sending fresh on
+// the previous tests guard against has a mirror: silently sending fresh on
 // every message would invalidate Octo's session-resume product semantics.
 func TestHandle_NoNewCommand_KeepsFreshFalse(t *testing.T) {
 	q := &fakeQueries{
@@ -485,6 +522,44 @@ func TestHandle_NoNewCommand_KeepsFreshFalse(t *testing.T) {
 	}
 	if e.forceFresh {
 		t.Errorf("plain message must not set forceFreshSession")
+	}
+}
+
+// /new in a topic channel (ChannelType=5) follows the same post-strip
+// contract as a group: the hub has already removed the leading "@<bot> ",
+// dispatcher sees "/new ..." and must strip + force-fresh. The hub's
+// addressedToBot only auto-trues for ChannelDM; topic and group both have
+// to be addressed via mention UID — the test sets AddressedToBot=true
+// directly so this dispatcher-level case stays independent of the hub's
+// addressing rule. Pins that the /new behavior generalizes beyond the
+// group case, matching the v2 review notes from Jerry-Xin and
+// mochashanyao.
+func TestHandle_TopicNewCommand_AfterHubStrip_ForcesFreshSession(t *testing.T) {
+	q := &fakeQueries{
+		inst:    activeInstallation(),
+		binding: boundUser(),
+	}
+	c := &fakeChat{session: db.ChatSession{ID: validUUID(0x22)}, appendResult: AppendResult{DedupMarked: true}}
+	e := &fakeEnqueuer{task: db.AgentTaskQueue{ID: validUUID(0x33)}}
+	d := newDispatcher(q, c, e, &fakeAudit{})
+
+	msg := dmMessage()
+	msg.ChannelType = ChannelTopic
+	msg.AddressedToBot = true
+	msg.Body = "/new restart"
+
+	res, err := d.Handle(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if res.Outcome != OutcomeIngested {
+		t.Fatalf("got %q, want ingested", res.Outcome)
+	}
+	if c.appendParams.Body != "restart" {
+		t.Errorf("AppendUserMessage Body = %q, want %q (topic /new must persist the post-command tail only)", c.appendParams.Body, "restart")
+	}
+	if !e.forceFresh {
+		t.Errorf("expected EnqueueChatTask to receive forceFreshSession=true after topic /new")
 	}
 }
 
