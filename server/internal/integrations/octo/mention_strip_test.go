@@ -151,10 +151,10 @@ func TestStripBotMentions(t *testing.T) {
 		//   stripBotMentions("@<bot>@<bot> hi", "robot_x",
 		//     []MentionEntity{{0,9},{6,6}})
 		//   → runtime error: slice bounds out of range [9:8]
-		// After dedup, only [0,9) survives; the trailing space at index 9
-		// is consumed by the adjacent-space trim, leaving the unrelated
-		// tail. Whatever the post-strip text is, the crucial property is
-		// that NO PANIC reaches the hub goroutine.
+		// After merge, [0,9) ∪ [6,12) → [0,12); excise + adjacent-space
+		// trim leaves "hi". The crucial property is that NO PANIC reaches
+		// the hub goroutine; the clean trailing body is the bonus of
+		// merging (vs. dropping) overlapping ranges.
 		{
 			name:    "overlapping entities do not panic",
 			content: "@<bot>@<bot> hi",
