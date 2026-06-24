@@ -81,7 +81,7 @@ type fakeEnqueuer struct {
 	called bool
 }
 
-func (f *fakeEnqueuer) EnqueueChatTask(ctx context.Context, session db.ChatSession, initiatorUserID pgtype.UUID) (db.AgentTaskQueue, error) {
+func (f *fakeEnqueuer) EnqueueChatTask(ctx context.Context, session db.ChatSession, initiatorUserID pgtype.UUID, forceFreshSession bool) (db.AgentTaskQueue, error) {
 	f.called = true
 	return f.task, f.err
 }
