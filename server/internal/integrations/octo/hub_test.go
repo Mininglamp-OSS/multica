@@ -479,3 +479,80 @@ func TestIsConversationChannel(t *testing.T) {
 		}
 	}
 }
+
+// End-to-end strip: a group inbound carrying the bot's own @mention as inline
+// text (with UTF-16 offset/length entities) must reach the dispatcher with
+// that mention removed from Body. Without this, downstream first-line
+// directive parsers (e.g. /new in dispatcher.Handle) silently no-op in groups
+// because the body still starts with "@<bot> …". Pins the wiring of
+// stripBotMentions into the hub's BotMessage → InboundMessage conversion.
+func TestHub_StripsBotMentionBeforeDispatch(t *testing.T) {
+	q := &fakeHubQueries{insts: []db.OctoInstallation{hubInst()}}
+	disp := &fakeHubDispatch{}
+
+	emitted := make(chan struct{})
+	factory := func(inst db.OctoInstallation) (Connector, error) {
+		return connectorFunc(func(ctx context.Context, inst db.OctoInstallation, onMessage func(transport.BotMessage)) error {
+			// Group message body as Octo delivers it: bot's @mention inline at
+			// the front of Content, with a MentionEntity pointing at its
+			// UTF-16 span.
+			onMessage(transport.BotMessage{
+				MessageID:   "m1",
+				FromUID:     "uid_human",
+				ChannelID:   "ch_group",
+				ChannelType: transport.ChannelGroup,
+				Payload: transport.MessagePayload{
+					Type:    transport.MsgText,
+					Content: "@<bot> /new restart",
+					Mention: &transport.MentionPayload{
+						UIDs: []string{"robot_hub"},
+						Entities: []transport.MentionEntity{
+							{UID: "robot_hub", Offset: 0, Length: 6},
+						},
+					},
+				},
+			})
+			close(emitted)
+			<-ctx.Done()
+			return ctx.Err()
+		}), nil
+	}
+
+	hub := NewHub(q, factory, disp, HubConfig{
+		LeaseTTL:           time.Second,
+		LeaseRenewInterval: time.Second,
+		SweepInterval:      time.Second,
+	}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { hub.Run(ctx); close(done) }()
+
+	select {
+	case <-emitted:
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("connector never emitted a message")
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	if disp.count() == 0 {
+		cancel()
+		t.Fatal("message was not dispatched")
+	}
+	got := disp.msgs[0]
+	if got.Body != "/new restart" {
+		t.Errorf("dispatched Body = %q, want %q (bot mention should have been stripped before dispatch)", got.Body, "/new restart")
+	}
+	if !got.AddressedToBot {
+		t.Errorf("AddressedToBot = false, want true (the mention UIDs include the bot)")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("hub did not shut down")
+	}
+}
+

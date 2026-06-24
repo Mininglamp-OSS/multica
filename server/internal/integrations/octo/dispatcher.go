@@ -59,6 +59,19 @@ func (d *Dispatcher) logger() *slog.Logger {
 // binding, ingested, …) are reported via DispatchResult; a non-nil error is
 // reserved for infra failures the caller may retry.
 func (d *Dispatcher) Handle(ctx context.Context, msg InboundMessage) (DispatchResult, error) {
+	// 0. Parse a leading /new directive. By the time we see msg, the hub has
+	//    already stripped the bot's own @mention from Body (see
+	//    stripBotMentions in mention_strip.go) so this strict-prefix match
+	//    works uniformly for DM, group, and topic channels — without the
+	//    upstream strip, a group body would still carry "@<bot>" in front of
+	//    /new and the match would fail silently. ForceFreshSession is the
+	//    only side effect; msg.Body is mutated to the post-strip text so
+	//    every downstream write (chat_message, agent context) is clean.
+	if cmd, ok := parseFreshSessionCommand(msg.Body); ok {
+		msg.ForceFreshSession = true
+		msg.Body = cmd.Body
+	}
+
 	// 1. Route to installation by robot_id. Runs before the dedup claim because
 	//    a routing failure has no installation row to attach a claim to.
 	inst, err := d.Queries.GetOctoInstallationByRobotID(ctx, msg.RobotID)
@@ -209,7 +222,7 @@ func (d *Dispatcher) processClaimed(ctx context.Context, msg InboundMessage, ins
 	//    already handed back the full session row, so there is no reload here. A
 	//    daemon that is merely disconnected is not an error — as long as the
 	//    agent has a runtime, the task waits to be claimed.
-	task, err := d.TaskService.EnqueueChatTask(ctx, session, binding.MulticaUserID, false)
+	task, err := d.TaskService.EnqueueChatTask(ctx, session, binding.MulticaUserID, msg.ForceFreshSession)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrChatTaskAgentNoRuntime):
