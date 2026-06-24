@@ -131,6 +131,55 @@ func TestStripBotMentions(t *testing.T) {
 			},
 			want: "",
 		},
+		// Regression for the v2 review P1 (Jerry-Xin / yujiawei on PR #46):
+		// duplicate entries for the same bot span used to slice the
+		// already-shortened content twice and panic with `slice bounds out
+		// of range`. Dedup by start/end keeps the first range only — the
+		// observable output is identical to a well-formed single-entity
+		// payload.
+		{
+			name:    "duplicate entities for same span do not panic",
+			content: "@<bot> hi",
+			robot:   bot,
+			entities: []transport.MentionEntity{
+				{UID: bot, Offset: 0, Length: 6},
+				{UID: bot, Offset: 0, Length: 6},
+			},
+			want: "hi",
+		},
+		// yujiawei's exact panic repro from the PR #46 review:
+		//   stripBotMentions("@<bot>@<bot> hi", "robot_x",
+		//     []MentionEntity{{0,9},{6,6}})
+		//   → runtime error: slice bounds out of range [9:8]
+		// After dedup, only [0,9) survives; the trailing space at index 9
+		// is consumed by the adjacent-space trim, leaving the unrelated
+		// tail. Whatever the post-strip text is, the crucial property is
+		// that NO PANIC reaches the hub goroutine.
+		{
+			name:    "overlapping entities do not panic",
+			content: "@<bot>@<bot> hi",
+			robot:   bot,
+			entities: []transport.MentionEntity{
+				{UID: bot, Offset: 0, Length: 9},
+				{UID: bot, Offset: 6, Length: 6},
+			},
+			want: "hi",
+		},
+		// Three overlapping ranges where the chain of overlaps would have
+		// reached past the original content's end after the first excise.
+		// Confirms the bounds guard at excise time too (defense-in-depth
+		// after dedup).
+		{
+			name:    "three overlapping entities do not panic",
+			content: "@<bot>x",
+			robot:   bot,
+			entities: []transport.MentionEntity{
+				{UID: bot, Offset: 0, Length: 6},
+				{UID: bot, Offset: 2, Length: 6},
+				{UID: bot, Offset: 4, Length: 6},
+			},
+			want: "x",
+		},
 	}
 
 	for _, tc := range tests {

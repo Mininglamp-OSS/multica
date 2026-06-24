@@ -556,3 +556,79 @@ func TestHub_StripsBotMentionBeforeDispatch(t *testing.T) {
 	}
 }
 
+// Surrogate-pair coverage at the hub layer: when the message body begins
+// with a surrogate-pair emoji ("👋", 2 UTF-16 code units) before the bot
+// mention, the wire entity's offset is 3 (one emoji + one space) and the
+// UTF-16→byte translation has to advance by 4 bytes for the emoji rather
+// than 2. The unit tests pin this in isolation; this test closes the seam
+// by driving the full hub→dispatcher path with a real BotMessage, per
+// mochashanyao's v2 review suggestion. Without the correct surrogate
+// handling, the byte slice would land inside the emoji's UTF-8 sequence
+// and either return garbled text or fail the offset-validity check.
+func TestHub_StripsBotMention_SurrogateEmojiPrefix(t *testing.T) {
+	q := &fakeHubQueries{insts: []db.OctoInstallation{hubInst()}}
+	disp := &fakeHubDispatch{}
+
+	emitted := make(chan struct{})
+	factory := func(inst db.OctoInstallation) (Connector, error) {
+		return connectorFunc(func(ctx context.Context, inst db.OctoInstallation, onMessage func(transport.BotMessage)) error {
+			onMessage(transport.BotMessage{
+				MessageID:   "m_emoji",
+				FromUID:     "uid_human",
+				ChannelID:   "ch_group",
+				ChannelType: transport.ChannelGroup,
+				Payload: transport.MessagePayload{
+					Type:    transport.MsgText,
+					Content: "👋 @<bot> /new restart",
+					Mention: &transport.MentionPayload{
+						UIDs: []string{"robot_hub"},
+						// "👋" = 1 rune, 2 UTF-16 code units; " " = 1 unit.
+						// "@<bot>" therefore starts at UTF-16 offset 3.
+						Entities: []transport.MentionEntity{
+							{UID: "robot_hub", Offset: 3, Length: 6},
+						},
+					},
+				},
+			})
+			close(emitted)
+			<-ctx.Done()
+			return ctx.Err()
+		}), nil
+	}
+
+	hub := NewHub(q, factory, disp, HubConfig{
+		LeaseTTL:           time.Second,
+		LeaseRenewInterval: time.Second,
+		SweepInterval:      time.Second,
+	}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { hub.Run(ctx); close(done) }()
+
+	select {
+	case <-emitted:
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("connector never emitted a message")
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	if disp.count() == 0 {
+		cancel()
+		t.Fatal("message was not dispatched")
+	}
+	got := disp.msgs[0]
+	if got.Body != "👋 /new restart" {
+		t.Errorf("dispatched Body = %q, want %q (surrogate-pair emoji preserved, bot mention stripped)", got.Body, "👋 /new restart")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("hub did not shut down")
+	}
+}
+
+

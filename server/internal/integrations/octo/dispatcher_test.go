@@ -525,3 +525,40 @@ func TestHandle_NoNewCommand_KeepsFreshFalse(t *testing.T) {
 	}
 }
 
+// /new in a topic channel (ChannelType=5) follows the same post-strip
+// contract as a group: the hub has already removed the leading "@<bot> ",
+// dispatcher sees "/new ..." and must strip + force-fresh. The dispatcher
+// gates `ChannelGroup` for the addressed-to-bot drop (see processClaimed),
+// but topic messages have AddressedToBot==true unconditionally per
+// addressedToBot, so the path that reaches the directive parser is the
+// same. Pins that the /new behavior generalizes beyond the group case,
+// matching the v2 review notes from Jerry-Xin and mochashanyao.
+func TestHandle_TopicNewCommand_AfterHubStrip_ForcesFreshSession(t *testing.T) {
+	q := &fakeQueries{
+		inst:    activeInstallation(),
+		binding: boundUser(),
+	}
+	c := &fakeChat{session: db.ChatSession{ID: validUUID(0x22)}, appendResult: AppendResult{DedupMarked: true}}
+	e := &fakeEnqueuer{task: db.AgentTaskQueue{ID: validUUID(0x33)}}
+	d := newDispatcher(q, c, e, &fakeAudit{})
+
+	msg := dmMessage()
+	msg.ChannelType = ChannelTopic
+	msg.AddressedToBot = true
+	msg.Body = "/new restart"
+
+	res, err := d.Handle(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if res.Outcome != OutcomeIngested {
+		t.Fatalf("got %q, want ingested", res.Outcome)
+	}
+	if c.appendParams.Body != "restart" {
+		t.Errorf("AppendUserMessage Body = %q, want %q (topic /new must persist the post-command tail only)", c.appendParams.Body, "restart")
+	}
+	if !e.forceFresh {
+		t.Errorf("expected EnqueueChatTask to receive forceFreshSession=true after topic /new")
+	}
+}
+
