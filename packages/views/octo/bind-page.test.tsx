@@ -1,9 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import type { ReactElement, ReactNode } from "react";
 import { I18nProvider } from "@multica/core/i18n/react";
 import enCommon from "../locales/en/common.json";
-import { OctoBindPage } from "./bind-page";
 
 const TEST_RESOURCES = { en: { common: enCommon } };
 
@@ -25,7 +24,15 @@ function renderWithI18n(ui: ReactElement) {
 
 const mockRedeem = vi.hoisted(() => vi.fn());
 const mockNavigate = vi.hoisted(() => vi.fn());
-const mockUser = vi.hoisted(() => ({ value: null as null | { id: string } }));
+
+// Mutable auth state — mirrors the Lark bind-page test so individual cases can
+// flip isLoading independently from user. The bind page reads both selectors;
+// without isLoading the page used to flash "needs-auth" before the session
+// resolved.
+const mockAuthState = vi.hoisted(() => ({
+  user: null as null | { id: string },
+  isLoading: false,
+}));
 
 // Minimal ApiError stub carrying the status code — bind-page now classifies
 // redemption failures by err.status, so the mock must expose the same class.
@@ -47,11 +54,9 @@ vi.mock("@multica/core/api", () => ({
 
 vi.mock("@multica/core/auth", () => ({
   useAuthStore: Object.assign(
-    (selector?: (s: unknown) => unknown) => {
-      const state = { user: mockUser.value };
-      return selector ? selector(state) : state;
-    },
-    { getState: () => ({ user: mockUser.value }) },
+    (selector?: (s: typeof mockAuthState) => unknown) =>
+      selector ? selector(mockAuthState) : mockAuthState,
+    { getState: () => mockAuthState },
   ),
 }));
 
@@ -59,10 +64,13 @@ vi.mock("../navigation", () => ({
   useNavigation: () => ({ push: mockNavigate, replace: mockNavigate }),
 }));
 
+import { OctoBindPage } from "./bind-page";
+
 describe("OctoBindPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockUser.value = { id: "u1" };
+    mockAuthState.user = { id: "u1" };
+    mockAuthState.isLoading = false;
   });
 
   it("redeems the token and shows the bound state when logged in", async () => {
@@ -92,7 +100,7 @@ describe("OctoBindPage", () => {
   });
 
   it("prompts for sign-in when the user is not authenticated", async () => {
-    mockUser.value = null;
+    mockAuthState.user = null;
     renderWithI18n(<OctoBindPage token="raw-token" />);
 
     await waitFor(() => {
@@ -103,6 +111,41 @@ describe("OctoBindPage", () => {
     // Must not attempt redemption without an identity (the redeemer is the
     // session, not the token).
     expect(mockRedeem).not.toHaveBeenCalled();
+  });
+
+  // Regression for the bug where the page flipped to "needs-auth" before
+  // useAuthStore finished hydrating, leading an already-authenticated user
+  // to click Sign in.
+  it("shows redeeming text while auth is still loading (not needs-auth)", () => {
+    mockAuthState.user = null;
+    mockAuthState.isLoading = true;
+    renderWithI18n(<OctoBindPage token="raw-token" />);
+    expect(
+      screen.getByText(enCommon.octo_bind.redeeming),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(enCommon.octo_bind.needs_auth_description),
+    ).toBeNull();
+  });
+
+  // Regression for the param-name bug: the page used to push ?redirect=,
+  // but the login page only honors ?next=. After Google OAuth round-trip
+  // the user landed on the workspace dashboard instead of returning to
+  // /octo/bind, so the binding never completed and the next Octo IM
+  // message produced a fresh auth prompt — a permanent loop.
+  it("sign-in button navigates with ?next= parameter (not ?redirect=)", () => {
+    mockAuthState.user = null;
+    mockAuthState.isLoading = false;
+    renderWithI18n(<OctoBindPage token="mytoken" />);
+    fireEvent.click(screen.getByText(enCommon.octo_bind.sign_in));
+    expect(mockNavigate).toHaveBeenCalledTimes(1);
+    const url = mockNavigate.mock.calls[0]?.[0] as string;
+    expect(url).toContain("?next=");
+    expect(url).not.toContain("?redirect=");
+    expect(url).toContain(encodeURIComponent("mytoken"));
+    // The destination encoded in ?next= must point back to /octo/bind so
+    // the post-login redirect resumes the redemption flow.
+    expect(url).toContain(encodeURIComponent("/octo/bind?token="));
   });
 
   it.each([
