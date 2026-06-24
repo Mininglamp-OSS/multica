@@ -34,7 +34,7 @@ type ChatService interface {
 // ChatTaskEnqueuer enqueues an agent run for a chat session. Satisfied by
 // *service.TaskService.
 type ChatTaskEnqueuer interface {
-	EnqueueChatTask(ctx context.Context, session db.ChatSession, initiatorUserID pgtype.UUID) (db.AgentTaskQueue, error)
+	EnqueueChatTask(ctx context.Context, session db.ChatSession, initiatorUserID pgtype.UUID, forceFreshSession bool) (db.AgentTaskQueue, error)
 }
 
 // Dispatcher converts inbound Octo messages into chat_session + chat_message
@@ -209,7 +209,7 @@ func (d *Dispatcher) processClaimed(ctx context.Context, msg InboundMessage, ins
 	//    already handed back the full session row, so there is no reload here. A
 	//    daemon that is merely disconnected is not an error — as long as the
 	//    agent has a runtime, the task waits to be claimed.
-	task, err := d.TaskService.EnqueueChatTask(ctx, session, binding.MulticaUserID)
+	task, err := d.TaskService.EnqueueChatTask(ctx, session, binding.MulticaUserID, false)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrChatTaskAgentNoRuntime):
