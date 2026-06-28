@@ -59,12 +59,14 @@ func (d *Dispatcher) logger() *slog.Logger {
 // binding, ingested, …) are reported via DispatchResult; a non-nil error is
 // reserved for infra failures the caller may retry.
 func (d *Dispatcher) Handle(ctx context.Context, msg InboundMessage) (DispatchResult, error) {
-	// 0. Parse a leading /new directive. Strip it from Body so the persisted
-	//    chat_message (and the agent's view of the turn) never sees the
-	//    command itself; the only side effect is ForceFreshSession=true,
-	//    which is forwarded to EnqueueChatTask below. Mirrors Lark's
-	//    inboundEnricher /new handling so the two integrations stay
-	//    product-identical.
+	// 0. Parse a leading /new directive. By the time we see msg, the hub has
+	//    already stripped the bot's own @mention from Body (see
+	//    stripBotMentions in mention_strip.go) so this strict-prefix match
+	//    works uniformly for DM, group, and topic channels — without the
+	//    upstream strip, a group body would still carry "@<bot>" in front of
+	//    /new and the match would fail silently. ForceFreshSession is the
+	//    only side effect; msg.Body is mutated to the post-strip text so
+	//    every downstream write (chat_message, agent context) is clean.
 	if cmd, ok := parseFreshSessionCommand(msg.Body); ok {
 		msg.ForceFreshSession = true
 		msg.Body = cmd.Body

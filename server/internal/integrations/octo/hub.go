@@ -294,7 +294,7 @@ func (h *Hub) onMessage(ctx context.Context, inst db.OctoInstallation, m transpo
 		SenderUID:      UID(m.FromUID),
 		ChannelID:      ChannelID(m.ChannelID),
 		ChannelType:    ChannelType(m.ChannelType),
-		Body:           m.Payload.Content,
+		Body:           stripBotMentions(m.Payload.Content, inst.RobotID, mentionEntities(m.Payload.Mention)),
 		AddressedToBot: addressedToBot(inst.RobotID, m),
 	}
 	res, err := h.dispatch.Handle(ctx, msg)
@@ -336,6 +336,16 @@ func addressedToBot(robotID string, m transport.BotMessage) bool {
 		}
 	}
 	return false
+}
+
+// mentionEntities returns the entity list from a mention payload, or nil if the
+// payload itself is nil. Lets callers pass the result straight into helpers
+// without nil-guarding the payload at every site.
+func mentionEntities(m *transport.MentionPayload) []transport.MentionEntity {
+	if m == nil {
+		return nil
+	}
+	return m.Entities
 }
 
 func (h *Hub) acquireLease(ctx context.Context, instID pgtype.UUID, token string) (bool, error) {

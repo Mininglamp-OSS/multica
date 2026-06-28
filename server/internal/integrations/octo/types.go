@@ -56,9 +56,11 @@ type InboundMessage struct {
 	ChannelID ChannelID
 	// ChannelType is the WuKongIM channel type (DM / group / topic).
 	ChannelType ChannelType
-	// Body is the message text handed to the agent. If the user typed a
-	// leading /new directive, the dispatcher strips it from Body before any
-	// downstream write — the agent never sees the command itself.
+	// Body is the message text handed to the agent. The hub strips the bot's
+	// OWN @mention (using Mention.Entities offset/length) before populating
+	// Body, so first-line directive parsers downstream — e.g. /new — see a
+	// clean leading body even on group/topic messages. Mentions of other
+	// users are left intact for the agent's context.
 	Body string
 	// ForceFreshSession is set by the dispatcher when the user's message
 	// began with /new. The flag is forwarded to EnqueueChatTask so the
