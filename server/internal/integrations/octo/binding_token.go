@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/util"
@@ -61,11 +60,12 @@ func (s *BindingTokenService) Mint(ctx context.Context, workspaceID, installatio
 		return BindingToken{}, fmt.Errorf("generate token: %w", err)
 	}
 	expiresAt := s.now().Add(BindingTokenTTL)
-	if _, err := s.queries.CreateOctoBindingToken(ctx, db.CreateOctoBindingTokenParams{
+	if _, err := s.queries.CreateChannelBindingToken(ctx, db.CreateChannelBindingTokenParams{
 		TokenHash:      hashToken(raw),
 		WorkspaceID:    workspaceID,
 		InstallationID: installationID,
-		OctoUid:        string(uid),
+		ChannelType:    string(TypeOcto),
+		ChannelUserID:  string(uid),
 		ExpiresAt:      pgtype.Timestamptz{Time: expiresAt, Valid: true},
 	}); err != nil {
 		return BindingToken{}, fmt.Errorf("persist token: %w", err)
@@ -73,10 +73,13 @@ func (s *BindingTokenService) Mint(ctx context.Context, workspaceID, installatio
 	return BindingToken{Raw: raw, ExpiresAt: expiresAt}, nil
 }
 
-// RedeemAndBind atomically consumes a raw token and writes the octo_user_binding
-// row in one transaction. The redeemer's identity is the supplied
-// multicaUserID (from the session, never the token), so a stolen token cannot
-// bind an Octo uid to an attacker's account.
+// RedeemAndBind atomically consumes a raw token and writes the
+// channel_user_binding row in one transaction. The redeemer's identity is the
+// supplied multicaUserID (from the session, never the token), so a stolen token
+// cannot bind an Octo uid to an attacker's account.
+//
+// channel_user_binding has no member FK (MUL-3515 §4), so membership is checked
+// explicitly in the app layer before the bind.
 //
 // Typed failures:
 //   - ErrBindingTokenInvalid: token missing / consumed / expired (one opaque
@@ -84,7 +87,7 @@ func (s *BindingTokenService) Mint(ctx context.Context, workspaceID, installatio
 //   - ErrBindingAlreadyAssigned: (installation, uid) already bound to a
 //     different user; rolled back so the existing holder is undisturbed.
 //   - ErrBindingNotWorkspaceMember: redeemer isn't a member of the token's
-//     workspace (composite FK to member trips).
+//     workspace.
 func (s *BindingTokenService) RedeemAndBind(ctx context.Context, raw string, multicaUserID pgtype.UUID) (RedeemedBindingToken, error) {
 	if s.tx == nil {
 		return RedeemedBindingToken{}, errors.New("octo: BindingTokenService missing TxStarter")
@@ -96,7 +99,7 @@ func (s *BindingTokenService) RedeemAndBind(ctx context.Context, raw string, mul
 	defer tx.Rollback(ctx)
 	qtx := s.queries.WithTx(tx)
 
-	row, err := qtx.ConsumeOctoBindingToken(ctx, hashToken(raw))
+	row, err := qtx.ConsumeChannelBindingToken(ctx, hashToken(raw))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return RedeemedBindingToken{}, ErrBindingTokenInvalid
@@ -104,23 +107,31 @@ func (s *BindingTokenService) RedeemAndBind(ctx context.Context, raw string, mul
 		return RedeemedBindingToken{}, fmt.Errorf("consume token: %w", err)
 	}
 
-	_, err = qtx.CreateOctoUserBinding(ctx, db.CreateOctoUserBindingParams{
+	// Membership is enforced in the app layer (no FK on channel_user_binding):
+	// refuse to bind a redeemer who is not a member of the token's workspace.
+	if _, err := qtx.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
+		UserID:      multicaUserID,
+		WorkspaceID: row.WorkspaceID,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return RedeemedBindingToken{}, ErrBindingNotWorkspaceMember
+		}
+		return RedeemedBindingToken{}, fmt.Errorf("check workspace membership: %w", err)
+	}
+
+	_, err = qtx.CreateChannelUserBinding(ctx, db.CreateChannelUserBindingParams{
 		WorkspaceID:    row.WorkspaceID,
 		MulticaUserID:  multicaUserID,
 		InstallationID: row.InstallationID,
-		OctoUid:        row.OctoUid,
+		ChannelType:    string(TypeOcto),
+		ChannelUserID:  row.ChannelUserID,
+		Config:         []byte("{}"),
 	})
 	if err != nil {
 		// pgx.ErrNoRows: the conflict row exists but points at a different
 		// multica_user_id, so the ON CONFLICT DO UPDATE WHERE rejected the rebind.
 		if errors.Is(err, pgx.ErrNoRows) {
 			return RedeemedBindingToken{}, ErrBindingAlreadyAssigned
-		}
-		// 23503 = foreign_key_violation against member(workspace_id, user_id):
-		// the redeemer is not a member of the token's workspace.
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-			return RedeemedBindingToken{}, ErrBindingNotWorkspaceMember
 		}
 		return RedeemedBindingToken{}, fmt.Errorf("create binding: %w", err)
 	}
@@ -131,7 +142,7 @@ func (s *BindingTokenService) RedeemAndBind(ctx context.Context, raw string, mul
 	return RedeemedBindingToken{
 		WorkspaceID:    row.WorkspaceID,
 		InstallationID: row.InstallationID,
-		OctoUID:        UID(row.OctoUid),
+		OctoUID:        UID(row.ChannelUserID),
 	}, nil
 }
 

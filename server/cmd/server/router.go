@@ -416,6 +416,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// (the InstallationService refuses plaintext token storage). When absent
 	// the Octo HTTP handlers return 503 and the rest of the server starts
 	// normally, so self-host deployments that have not opted in are unaffected.
+	//
+	// Octo is a channel.Channel implementation driven by the shared
+	// ChannelSupervisor + ChannelRouter (like Feishu and Slack): registering the
+	// Factory + ResolverSet is all the inbound wiring; the Supervisor opens the
+	// WuKongIM connection per installation. No Octo-specific hub.
 	if octoKey, err := secretbox.LoadKey("MULTICA_OCTO_SECRET_KEY"); err == nil {
 		if box, err := secretbox.New(octoKey); err != nil {
 			slog.Error("octo: secretbox.New failed; octo integration disabled", "error", err)
@@ -437,42 +442,32 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			slog.Info("octo integration enabled")
 
 			// Outbound: relay chat:done / task:failed back to Octo.
-			patcher := octo.NewPatcher(queries, installSvc, octo.NewMessageSender(), slog.Default())
-			patcher.Register(bus)
+			octo.NewPatcher(queries, installSvc, octo.NewMessageSender(), slog.Default()).Register(bus)
 
-			// Inbound: audit + chat-session service + dispatcher.
-			dispatcher := &octo.Dispatcher{
-				Queries:     queries,
-				Chat:        octo.NewChatSessionService(queries, pool),
-				TaskService: h.TaskService,
-				Audit:       octo.NewAuditLogger(queries),
-				Logger:      slog.Default(),
-			}
-
-			// WS hub: per-installation lease + transport.Socket connection.
-			connectorFactory := octo.NewConnectorFactory(installSvc, slog.Default())
-			h.OctoHub = octo.NewHub(queries, connectorFactory, dispatcher, octo.HubConfig{}, slog.Default())
-
-			// Outbound replier for the synchronous outcomes: DM an unbound
-			// sender a binding link, or notify the user when the agent is
-			// offline/archived. Reuses the same MessageSender + token
-			// decryptor as the Patcher. PublicURL drives the clickable
-			// {PublicURL}/octo/bind?token= link.
-			h.OctoHub.SetOutcomeReplier(octo.NewOutcomeReplier(octo.OutcomeReplierConfig{
+			// Outbound replier for the synchronous, pre-agent outcomes: DM an
+			// unbound sender a binding link, or notify the user when the agent is
+			// offline/archived. Reuses the same MessageSender + token decryptor as
+			// the Patcher. PublicURL drives the clickable {PublicURL}/octo/bind
+			// link.
+			octoReplier := octo.NewOutcomeReplier(octo.OutcomeReplierConfig{
 				Minter:    h.OctoBindingTokens,
 				Decryptor: installSvc,
 				Sender:    octo.NewMessageSender(),
 				PublicURL: signupConfig.PublicURL,
 				Logger:    slog.Default(),
-			}))
-			// Make the binding-link capability explicit in boot output: without
-			// MULTICA_PUBLIC_URL the replier still runs but cannot produce a
-			// clickable bind link, so unbound users silently can't self-serve.
+			})
 			if signupConfig.PublicURL == "" {
 				slog.Warn("octo: MULTICA_PUBLIC_URL not set; unbound users will NOT receive a clickable binding link")
 			} else {
 				slog.Info("octo: binding links enabled", "public_url", signupConfig.PublicURL)
 			}
+
+			// Inbound: register the channel.Channel Factory + the ResolverSet on
+			// the shared engine. The ChannelSupervisor opens/owns the WuKongIM
+			// connection per octo installation; the ChannelRouter runs the shared
+			// inbound pipeline (dedup, identity, session, /issue, run batching).
+			octo.RegisterOcto(channelRegistry, octo.OctoChannelDeps{Decrypt: box.Open, Logger: slog.Default()})
+			channelRouter.Register(octo.TypeOcto, octo.NewOctoResolverSet(queries, pool, octoReplier))
 			slog.Info("octo inbound pipeline wired")
 		}
 	} else {

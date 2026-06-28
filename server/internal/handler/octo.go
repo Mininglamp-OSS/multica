@@ -31,13 +31,25 @@ type OctoInstallationResponse struct {
 	UpdatedAt       string `json:"updated_at"`
 }
 
-func octoInstallationToResponse(row db.OctoInstallation) OctoInstallationResponse {
+// octoInstallationConfig is the slice of channel_installation.config the HTTP
+// response surfaces. The full blob also carries the encrypted bot token, which
+// is intentionally never read here.
+type octoInstallationConfig struct {
+	RobotID string `json:"robot_id"`
+	BotName string `json:"bot_name"`
+}
+
+func octoInstallationToResponse(row db.ChannelInstallation) OctoInstallationResponse {
+	var cfg octoInstallationConfig
+	if len(row.Config) > 0 {
+		_ = json.Unmarshal(row.Config, &cfg)
+	}
 	return OctoInstallationResponse{
 		ID:              uuidToString(row.ID),
 		WorkspaceID:     uuidToString(row.WorkspaceID),
 		AgentID:         uuidToString(row.AgentID),
-		RobotID:         row.RobotID,
-		BotName:         row.BotName,
+		RobotID:         cfg.RobotID,
+		BotName:         cfg.BotName,
 		InstallerUserID: uuidToString(row.InstallerUserID),
 		Status:          row.Status,
 		InstalledAt:     row.InstalledAt.Time.UTC().Format(time.RFC3339),

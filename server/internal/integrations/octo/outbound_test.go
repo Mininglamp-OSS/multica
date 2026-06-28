@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/octo/transport"
@@ -15,22 +14,22 @@ import (
 )
 
 type fakePatcherQueries struct {
-	binding    db.OctoChatSessionBinding
+	binding    db.ChannelChatSessionBinding
 	bindingErr error
-	inst       db.OctoInstallation
+	inst       db.ChannelInstallation
 	instErr    error
-	recorded   *db.CreateOctoOutboundMessageParams
+	recorded   *db.CreateChannelOutboundCardMessageParams
 }
 
-func (f *fakePatcherQueries) GetOctoChatSessionBindingBySession(ctx context.Context, id pgtype.UUID) (db.OctoChatSessionBinding, error) {
+func (f *fakePatcherQueries) GetChannelChatSessionBindingBySession(ctx context.Context, arg db.GetChannelChatSessionBindingBySessionParams) (db.ChannelChatSessionBinding, error) {
 	return f.binding, f.bindingErr
 }
-func (f *fakePatcherQueries) GetOctoInstallation(ctx context.Context, id pgtype.UUID) (db.OctoInstallation, error) {
+func (f *fakePatcherQueries) GetChannelInstallation(ctx context.Context, arg db.GetChannelInstallationParams) (db.ChannelInstallation, error) {
 	return f.inst, f.instErr
 }
-func (f *fakePatcherQueries) CreateOctoOutboundMessage(ctx context.Context, arg db.CreateOctoOutboundMessageParams) (db.OctoOutboundMessage, error) {
+func (f *fakePatcherQueries) CreateChannelOutboundCardMessage(ctx context.Context, arg db.CreateChannelOutboundCardMessageParams) (db.ChannelOutboundCardMessage, error) {
 	f.recorded = &arg
-	return db.OctoOutboundMessage{}, nil
+	return db.ChannelOutboundCardMessage{}, nil
 }
 
 type fakeDecryptor struct {
@@ -38,7 +37,7 @@ type fakeDecryptor struct {
 	err   error
 }
 
-func (f fakeDecryptor) DecryptBotToken(inst db.OctoInstallation) (string, error) {
+func (f fakeDecryptor) DecryptBotToken(inst db.ChannelInstallation) (string, error) {
 	return f.token, f.err
 }
 
@@ -58,16 +57,23 @@ func (f *fakeSender) Send(ctx context.Context, apiURL, botToken, channelID strin
 	return f.res, f.err
 }
 
-func activeInst() db.OctoInstallation {
-	return db.OctoInstallation{ID: validUUID(0xAA), Status: "active", ApiUrl: "https://im.example/api"}
+func activeInst() db.ChannelInstallation {
+	return db.ChannelInstallation{
+		ID:          validUUID(0xAA),
+		ChannelType: string(TypeOcto),
+		Status:      "active",
+		Config:      []byte(`{"app_id":"robot_x","api_url":"https://im.example/api"}`),
+	}
 }
 
-func octoBinding() db.OctoChatSessionBinding {
-	return db.OctoChatSessionBinding{
-		ChatSessionID:   validUUID(0x22),
-		InstallationID:  validUUID(0xAA),
-		OctoChannelID:   "ch_1",
-		OctoChannelType: 1,
+func octoBinding() db.ChannelChatSessionBinding {
+	return db.ChannelChatSessionBinding{
+		ChatSessionID:  validUUID(0x22),
+		InstallationID: validUUID(0xAA),
+		ChannelType:    string(TypeOcto),
+		ChannelChatID:  "ch_1",
+		ChatType:       "p2p",
+		Config:         []byte(`{"channel_type":1}`),
 	}
 }
 
@@ -95,7 +101,7 @@ func TestProcessEvent_ChatDone_SendsReply(t *testing.T) {
 	if s.sent != 1 || s.lastTxt != "hello world" {
 		t.Errorf("sent=%d lastTxt=%q", s.sent, s.lastTxt)
 	}
-	if q.recorded == nil || q.recorded.OctoMessageID != "m1" {
+	if q.recorded == nil || q.recorded.ChannelCardMessageID != "m1" {
 		t.Errorf("expected outbound message recorded with id m1, got %+v", q.recorded)
 	}
 }
