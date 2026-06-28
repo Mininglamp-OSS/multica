@@ -1,6 +1,11 @@
 package octo
 
-import "github.com/jackc/pgx/v5/pgtype"
+import (
+	"io"
+	"log/slog"
+
+	"github.com/jackc/pgx/v5/pgtype"
+)
 
 // validUUID builds a deterministic, valid pgtype.UUID from a single byte so
 // tests can fabricate distinct ids without a database. The byte fills all 16
@@ -12,4 +17,9 @@ func validUUID(b byte) pgtype.UUID {
 	}
 	u.Valid = true
 	return u
+}
+
+// testLogger returns a discard logger so tests don't spam output.
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
 	"github.com/multica-ai/multica/server/internal/integrations/octo/transport"
@@ -76,6 +77,13 @@ func (c *octoChannel) Connect(ctx context.Context) error {
 		return fmt.Errorf("octo: register bot: %w", err)
 	}
 
+	// A terminal socket error (kicked, rapid disconnect, stale im_token) stops
+	// the socket's internal reconnect loop and fires OnError. Surface it through
+	// this channel so Connect unwinds and the Supervisor rebuilds the channel
+	// under backoff — which re-runs register for a fresh im_token. Buffered so
+	// the socket's OnError callback never blocks; only the first error matters.
+	socketErr := make(chan error, 1)
+
 	sock := c.newSocket(transport.SocketOptions{
 		WSURL: reg.WSURL,
 		UID:   reg.RobotID,
@@ -85,6 +93,10 @@ func (c *octoChannel) Connect(ctx context.Context) error {
 		},
 		OnError: func(e error) {
 			c.logger.WarnContext(ctx, "octo: socket error", "robot_id", c.creds.RobotID, "error", e)
+			select {
+			case socketErr <- e:
+			default:
+			}
 		},
 		Logf: func(format string, args ...any) {
 			c.logger.Debug(fmt.Sprintf(format, args...))
@@ -95,19 +107,30 @@ func (c *octoChannel) Connect(ctx context.Context) error {
 	}
 	defer sock.Disconnect()
 
-	<-ctx.Done()
-	return nil
+	select {
+	case <-ctx.Done():
+		// Graceful teardown: the Supervisor cancelled the run context.
+		return nil
+	case err := <-socketErr:
+		// The socket gave up reconnecting. ctx cancellation racing the error is a
+		// graceful stop, not a failure.
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("octo: socket terminated: %w", err)
+	}
 }
 
 // Disconnect is a no-op: the socket is torn down by ctx cancellation (the
 // Supervisor cancels the run context), mirroring the other adapters.
 func (c *octoChannel) Disconnect(ctx context.Context) error { return nil }
 
-// Send posts a reply to the bound Octo channel. The WuKongIM channel type the
-// REST API needs is not carried on channel.OutboundMessage, so the outbound
-// caller (octo.Outbound) stashes it on the binding config and threads it through
-// — Send itself defaults to the DM channel type, which the bus-driven Outbound
-// path overrides via its own sender. (The engine never calls Send directly.)
+// Send posts a plain reply to the bound Octo channel. It exists to satisfy the
+// channel.Channel interface, but Octo's real outbound path is the bus-driven
+// Patcher (outbound.go), which sends with the exact WuKongIM channel type read
+// back from the binding config — the engine never calls Send for Octo. Because
+// channel.OutboundMessage does not carry the numeric channel type, Send can only
+// assume a 1:1 DM; callers needing group/topic delivery must use the Patcher.
 func (c *octoChannel) Send(ctx context.Context, out channel.OutboundMessage) (channel.SendResult, error) {
 	hc := transport.NewHTTPClient(c.creds.APIURL, c.creds.BotToken)
 	res, err := hc.SendMessage(ctx, transport.SendMessageParams{
@@ -227,12 +250,7 @@ func addressedToBot(robotID string, m transport.BotMessage) bool {
 	if m.Payload.Mention == nil {
 		return false
 	}
-	for _, uid := range m.Payload.Mention.UIDs {
-		if uid == robotID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(m.Payload.Mention.UIDs, robotID)
 }
 
 // mentionEntities returns the entity list from a mention payload, or nil if the
