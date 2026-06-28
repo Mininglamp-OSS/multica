@@ -191,9 +191,9 @@ func (q *Queries) CreateChannelBindingToken(ctx context.Context, arg CreateChann
 const createChannelChatSessionBinding = `-- name: CreateChannelChatSessionBinding :one
 
 INSERT INTO channel_chat_session_binding (
-    chat_session_id, installation_id, channel_type, channel_chat_id, chat_type
+    chat_session_id, installation_id, channel_type, channel_chat_id, chat_type, config
 ) VALUES (
-    $1, $2, $3, $4, $5
+    $1, $2, $3, $4, $5, $6
 )
 RETURNING id, chat_session_id, installation_id, channel_type, channel_chat_id, chat_type, last_message_id, last_thread_id, config, created_at
 `
@@ -204,11 +204,18 @@ type CreateChannelChatSessionBindingParams struct {
 	ChannelType    string      `json:"channel_type"`
 	ChannelChatID  string      `json:"channel_chat_id"`
 	ChatType       string      `json:"chat_type"`
+	Config         []byte      `json:"config"`
 }
 
 // =====================
 // channel_chat_session_binding
 // =====================
+// channel_chat_id is the session-isolation key (one chat_session per
+// (installation_id, channel_chat_id)): Feishu passes the chat id; Slack passes
+// a stable key that, for channels, includes the thread root so each @bot thread
+// is its own session. config carries any platform-specific outbound routing the
+// key alone does not (e.g. Slack's real channel_id when the key is composite);
+// it is opaque to the shared session service.
 func (q *Queries) CreateChannelChatSessionBinding(ctx context.Context, arg CreateChannelChatSessionBindingParams) (ChannelChatSessionBinding, error) {
 	row := q.db.QueryRow(ctx, createChannelChatSessionBinding,
 		arg.ChatSessionID,
@@ -216,6 +223,7 @@ func (q *Queries) CreateChannelChatSessionBinding(ctx context.Context, arg Creat
 		arg.ChannelType,
 		arg.ChannelChatID,
 		arg.ChatType,
+		arg.Config,
 	)
 	var i ChannelChatSessionBinding
 	err := row.Scan(
@@ -623,6 +631,56 @@ ORDER BY ci.created_at ASC
 // archival, so an archived-but-present agent's installation is still listed.
 func (q *Queries) ListActiveChannelInstallations(ctx context.Context, channelType string) ([]ChannelInstallation, error) {
 	rows, err := q.db.Query(ctx, listActiveChannelInstallations, channelType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ChannelInstallation{}
+	for rows.Next() {
+		var i ChannelInstallation
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.AgentID,
+			&i.ChannelType,
+			&i.Config,
+			&i.Status,
+			&i.WsLeaseToken,
+			&i.WsLeaseExpiresAt,
+			&i.InstallerUserID,
+			&i.InstalledAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAllActiveChannelInstallations = `-- name: ListAllActiveChannelInstallations :many
+SELECT ci.id, ci.workspace_id, ci.agent_id, ci.channel_type, ci.config, ci.status, ci.ws_lease_token, ci.ws_lease_expires_at, ci.installer_user_id, ci.installed_at, ci.created_at, ci.updated_at FROM channel_installation ci
+JOIN workspace w ON w.id = ci.workspace_id
+JOIN agent a ON a.id = ci.agent_id
+WHERE ci.status = 'active'
+ORDER BY ci.created_at ASC
+`
+
+// Boot path for the channel-agnostic engine Supervisor (MUL-3620): every
+// active installation across ALL channel types, so one Supervisor drives every
+// platform's connections rather than a per-platform hub. This is the de-
+// hardcoded counterpart of ListActiveChannelInstallations — the Supervisor
+// routes each row to its registered channel.Factory by channel_type, so it
+// never needs to know which platforms exist. Same orphan guard as the per-type
+// query: the workspace + agent JOINs drop installations whose owning rows are
+// gone (channel_installation has no FK, MUL-3515 §4), matching the old ON
+// DELETE CASCADE semantics (row existence, not agent archival).
+func (q *Queries) ListAllActiveChannelInstallations(ctx context.Context) ([]ChannelInstallation, error) {
+	rows, err := q.db.Query(ctx, listAllActiveChannelInstallations)
 	if err != nil {
 		return nil, err
 	}

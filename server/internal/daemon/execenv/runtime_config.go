@@ -122,11 +122,19 @@ func formatProjectResource(r ProjectResourceForEnv) string {
 		var payload struct {
 			URL               string `json:"url"`
 			DefaultBranchHint string `json:"default_branch_hint,omitempty"`
+			Ref               string `json:"ref,omitempty"`
 		}
 		_ = json.Unmarshal(r.ResourceRef, &payload)
 		out := fmt.Sprintf("**GitHub repo**: %s", payload.URL)
+		details := make([]string, 0, 2)
+		if payload.Ref != "" {
+			details = append(details, fmt.Sprintf("checkout ref: `%s`", payload.Ref))
+		}
 		if payload.DefaultBranchHint != "" {
-			out += fmt.Sprintf(" (default branch: `%s`)", payload.DefaultBranchHint)
+			details = append(details, fmt.Sprintf("default branch hint: `%s`", payload.DefaultBranchHint))
+		}
+		if len(details) > 0 {
+			out += " (" + strings.Join(details, ", ") + ")"
 		}
 		if label != "" {
 			out += " — " + label
@@ -565,10 +573,14 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		b.WriteString("The following code repositories are available in this workspace.\n")
 		b.WriteString("Use `multica repo checkout <url>` to check out a repository into your working directory. Add `--ref <branch-or-sha>` when you need an exact branch, tag, or commit.\n\n")
 		for _, repo := range ctx.Repos {
+			refHint := ""
+			if repo.Ref != "" {
+				refHint = fmt.Sprintf(" (default ref: `%s`)", repo.Ref)
+			}
 			if repo.Description != "" {
-				fmt.Fprintf(&b, "- %s — %s\n", repo.URL, repo.Description)
+				fmt.Fprintf(&b, "- %s%s — %s\n", repo.URL, refHint, repo.Description)
 			} else {
-				fmt.Fprintf(&b, "- %s\n", repo.URL)
+				fmt.Fprintf(&b, "- %s%s\n", repo.URL, refHint)
 			}
 		}
 		b.WriteString("\nThe checkout command creates a git worktree with a dedicated branch. You can check out one or more repos as needed, and can pass `--ref` for review/QA on a non-default branch or commit.\n\n")
@@ -814,6 +826,7 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 		} else {
 			b.WriteString("⚠️ **Final results MUST be delivered via `multica issue comment add`.** The user does NOT see your terminal output, assistant chat text, or run logs — only comments on the issue. A task that finishes without a result comment is invisible to the user, even if the work itself was correct.\n\n")
 		}
+		b.WriteString("**Post exactly ONE comment per run — your final result, before this turn exits.** Do NOT post progress updates, plans, or \"here's what I'm about to do next\" as comments while you work; keep all planning and progress in your own reasoning.\n\n")
 		b.WriteString("Keep comments concise and natural — state the outcome, not the process.\n")
 		b.WriteString("Good: \"Fixed the login redirect. PR: https://...\"\n")
 		b.WriteString("Bad: \"1. Read the issue 2. Found the bug in auth.go 3. Created branch 4. ...\"\n")

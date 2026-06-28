@@ -28,6 +28,7 @@ import type {
   CreateRuntimeProfileRequest,
   UpdateRuntimeProfileRequest,
   InboxItem,
+  InboxWorkspaceUnread,
   IssueSubscriber,
   Comment,
   CommentTriggerPreview,
@@ -168,6 +169,8 @@ import {
   EMPTY_CREATE_AGENT_FROM_TEMPLATE_RESPONSE,
   EMPTY_GROUPED_ISSUES_RESPONSE,
   EMPTY_LIST_ISSUES_RESPONSE,
+  EMPTY_SEARCH_ISSUES_RESPONSE,
+  EMPTY_SEARCH_PROJECTS_RESPONSE,
   EMPTY_SQUAD,
   EMPTY_SQUAD_LIST,
   EMPTY_SQUAD_MEMBER_STATUS_LIST,
@@ -186,6 +189,8 @@ import {
   RuntimeUsageByAgentListSchema,
   RuntimeUsageByHourListSchema,
   RuntimeUsageListSchema,
+  SearchIssuesResponseSchema,
+  SearchProjectsResponseSchema,
   SquadSchema,
   SquadListSchema,
   SquadMemberStatusListResponseSchema,
@@ -224,6 +229,8 @@ import {
   EMPTY_LIST_OCTO_INSTALLATIONS_RESPONSE,
   RedeemOctoBindingTokenResponseSchema,
   EMPTY_REDEEM_OCTO_BINDING_TOKEN_RESPONSE,
+  InboxUnreadSummarySchema,
+  EMPTY_INBOX_UNREAD_SUMMARY,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -574,7 +581,13 @@ export class ApiClient {
     if (params.limit !== undefined) search.set("limit", String(params.limit));
     if (params.offset !== undefined) search.set("offset", String(params.offset));
     if (params.include_closed) search.set("include_closed", "true");
-    return this.fetch(`/api/issues/search?${search}`, params.signal ? { signal: params.signal } : undefined);
+    const raw = await this.fetch<unknown>(
+      `/api/issues/search?${search}`,
+      params.signal ? { signal: params.signal } : undefined,
+    );
+    return parseWithFallback(raw, SearchIssuesResponseSchema, EMPTY_SEARCH_ISSUES_RESPONSE, {
+      endpoint: "GET /api/issues/search",
+    });
   }
 
   async searchProjects(params: { q: string; limit?: number; offset?: number; include_closed?: boolean; signal?: AbortSignal }): Promise<SearchProjectsResponse> {
@@ -582,7 +595,13 @@ export class ApiClient {
     if (params.limit !== undefined) search.set("limit", String(params.limit));
     if (params.offset !== undefined) search.set("offset", String(params.offset));
     if (params.include_closed) search.set("include_closed", "true");
-    return this.fetch(`/api/projects/search?${search}`, params.signal ? { signal: params.signal } : undefined);
+    const raw = await this.fetch<unknown>(
+      `/api/projects/search?${search}`,
+      params.signal ? { signal: params.signal } : undefined,
+    );
+    return parseWithFallback(raw, SearchProjectsResponseSchema, EMPTY_SEARCH_PROJECTS_RESPONSE, {
+      endpoint: "GET /api/projects/search",
+    });
   }
 
   async getIssue(id: string): Promise<Issue> {
@@ -1480,6 +1499,17 @@ export class ApiClient {
 
   async getUnreadInboxCount(): Promise<{ count: number }> {
     return this.fetch("/api/inbox/unread-count");
+  }
+
+  // Cross-workspace unread summary: one entry per workspace the user belongs
+  // to that has unread inbox items. Backs the workspace-switcher dot for
+  // OTHER workspaces. Schema-guarded so a contract drift hides the dot rather
+  // than crashing the sidebar.
+  async getInboxUnreadSummary(): Promise<InboxWorkspaceUnread[]> {
+    const raw = await this.fetch<unknown>("/api/inbox/unread-summary");
+    return parseWithFallback(raw, InboxUnreadSummarySchema, EMPTY_INBOX_UNREAD_SUMMARY, {
+      endpoint: "GET /api/inbox/unread-summary",
+    });
   }
 
   async markAllInboxRead(): Promise<{ count: number }> {
