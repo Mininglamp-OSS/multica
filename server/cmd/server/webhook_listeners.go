@@ -37,49 +37,69 @@ func registerWebhookListeners(bus *events.Bus, d *outwebhook.Dispatcher) {
 		if !statusChanged {
 			return
 		}
-		projectID, issue, ok := webhookIssuePayload(payload["issue"])
+		fields, ok := webhookIssuePayload(payload["issue"])
 		if !ok {
 			slog.Debug("webhook listener: unrecognized issue payload shape")
 			return
 		}
 		prevStatus, _ := payload["prev_status"].(string)
-		identifier, assigneeType, assigneeID := webhookIssueEnrichFields(payload["issue"])
 
 		d.DispatchIssueStatusChanged(outwebhook.IssueStatusChanged{
 			WorkspaceID:    e.WorkspaceID,
-			ProjectID:      projectID,
+			ProjectID:      fields.projectID,
 			ActorType:      e.ActorType,
 			ActorID:        e.ActorID,
 			PreviousStatus: prevStatus,
-			Issue:          issue,
-			Identifier:     identifier,
-			AssigneeType:   assigneeType,
-			AssigneeID:     assigneeID,
+			Issue:          fields.issue,
+			Identifier:     fields.identifier,
+			AssigneeType:   fields.assigneeType,
+			AssigneeID:     fields.assigneeID,
 		})
 	})
 }
 
-// webhookIssueEnrichFields pulls the identifier + polymorphic assignee
-// (assignee_type / assignee_id) out of either issue payload shape so the
-// dispatcher can build issue_url + resolve the assignee name without importing
-// the handler package (which imports outwebhook — an import cycle). Missing
-// fields come back as "".
-func webhookIssueEnrichFields(raw any) (identifier, assigneeType, assigneeID string) {
+// webhookIssueFields is everything the listener extracts from an issue:updated
+// payload in one pass: the project id (project-level routing), the raw issue
+// body to embed verbatim, and the identifier + polymorphic assignee the
+// dispatcher needs to build issue_url + resolve the assignee name. The extraction
+// lives here (not in outwebhook) because reading the typed handler.IssueResponse
+// from outwebhook would be an import cycle (handler imports outwebhook).
+type webhookIssueFields struct {
+	projectID    string
+	issue        any
+	identifier   string
+	assigneeType string
+	assigneeID   string
+}
+
+// webhookIssuePayload extracts webhookIssueFields from either shape of the
+// issue:updated payload: the typed handler.IssueResponse (handler paths) or the
+// map[string]any emitted by service-layer status changes (e.g. issueToMap).
+// Returns ok=false when neither shape is present. Missing fields come back as "".
+func webhookIssuePayload(raw any) (webhookIssueFields, bool) {
 	switch v := raw.(type) {
 	case handler.IssueResponse:
-		identifier = v.Identifier
+		f := webhookIssueFields{issue: v, identifier: v.Identifier}
+		if v.ProjectID != nil {
+			f.projectID = *v.ProjectID
+		}
 		if v.AssigneeType != nil {
-			assigneeType = *v.AssigneeType
+			f.assigneeType = *v.AssigneeType
 		}
 		if v.AssigneeID != nil {
-			assigneeID = *v.AssigneeID
+			f.assigneeID = *v.AssigneeID
 		}
+		return f, true
 	case map[string]any:
-		identifier, _ = v["identifier"].(string)
-		assigneeType = stringFromMap(v["assignee_type"])
-		assigneeID = stringFromMap(v["assignee_id"])
+		f := webhookIssueFields{issue: v}
+		f.projectID = stringFromMap(v["project_id"])
+		f.identifier, _ = v["identifier"].(string)
+		f.assigneeType = stringFromMap(v["assignee_type"])
+		f.assigneeID = stringFromMap(v["assignee_id"])
+		return f, true
+	default:
+		return webhookIssueFields{}, false
 	}
-	return identifier, assigneeType, assigneeID
 }
 
 // stringFromMap reads a string value from an issue map field that may be a
@@ -95,31 +115,4 @@ func stringFromMap(raw any) string {
 		}
 	}
 	return ""
-}
-
-// webhookIssuePayload extracts the project id (for project-level routing) and
-// the issue body to embed in the webhook, from either shape of the issue:updated
-// payload: the typed handler.IssueResponse (handler paths) or the map[string]any
-// emitted by service-layer status changes (e.g. issueToMap). Returns ok=false
-// when neither shape is present.
-func webhookIssuePayload(raw any) (projectID string, issue any, ok bool) {
-	switch v := raw.(type) {
-	case handler.IssueResponse:
-		if v.ProjectID != nil {
-			projectID = *v.ProjectID
-		}
-		return projectID, v, true
-	case map[string]any:
-		switch p := v["project_id"].(type) {
-		case string:
-			projectID = p
-		case *string:
-			if p != nil {
-				projectID = *p
-			}
-		}
-		return projectID, v, true
-	default:
-		return "", nil, false
-	}
 }
