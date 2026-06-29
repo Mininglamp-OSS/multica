@@ -91,12 +91,15 @@ type Store interface {
 	// Read-only lookups for payload enrichment (issue_url + assignee_name).
 	// All best-effort on the dispatch worker: a failed lookup degrades the
 	// enriched field to empty, never blocks delivery. Backed by existing sqlc
-	// queries — no new SQL.
+	// queries — no new SQL. The assignee getters are workspace-scoped (matching
+	// the authoritative validateAssigneePair path) so a stale/cross-workspace
+	// assignee_id cannot leak another workspace's name; the member key is the
+	// USER id, not the member PK.
 	GetWorkspace(ctx context.Context, id pgtype.UUID) (db.Workspace, error)
-	GetMember(ctx context.Context, id pgtype.UUID) (db.Member, error)
+	GetMemberByUserAndWorkspace(ctx context.Context, arg db.GetMemberByUserAndWorkspaceParams) (db.Member, error)
 	GetUser(ctx context.Context, id pgtype.UUID) (db.User, error)
-	GetAgent(ctx context.Context, id pgtype.UUID) (db.Agent, error)
-	GetSquad(ctx context.Context, id pgtype.UUID) (db.Squad, error)
+	GetAgentInWorkspace(ctx context.Context, arg db.GetAgentInWorkspaceParams) (db.Agent, error)
+	GetSquadInWorkspace(ctx context.Context, arg db.GetSquadInWorkspaceParams) (db.Squad, error)
 }
 
 // recordTimeout bounds the best-effort delivery-history write so a slow DB can
@@ -143,7 +146,7 @@ type deliverJob struct {
 type Dispatcher struct {
 	store        Store
 	client       *http.Client
-	publicURL    string // absolute base URL (no trailing slash) for building issue_url; "" disables links
+	appURL       string // absolute frontend app base URL (no trailing slash) for building issue_url; "" disables links
 	events       chan IssueStatusChanged
 	jobs         chan deliverJob
 	retryBackoff []time.Duration
@@ -164,20 +167,21 @@ type Dispatcher struct {
 // New builds a Dispatcher and starts its worker pools. The HTTP client is
 // SSRF-restricted (rejects internal addresses at dial time, on every redirect
 // hop) and carries a fixed per-request timeout; retries are handled per attempt.
-// publicURL is the absolute base URL (no trailing slash) used to build issue_url
-// links in the payload; pass "" to omit links.
-func New(store Store, publicURL string) *Dispatcher {
-	return newWithClient(store, publicURL, netguard.NewRestrictedHTTPClient(deliveryTimeout))
+// appURL is the absolute FRONTEND app base URL (no trailing slash) used to build
+// issue_url links (MULTICA_APP_URL / FRONTEND_ORIGIN — NOT the API URL); pass ""
+// to omit links.
+func New(store Store, appURL string) *Dispatcher {
+	return newWithClient(store, appURL, netguard.NewRestrictedHTTPClient(deliveryTimeout))
 }
 
 // newWithClient is the shared constructor. Tests use it to inject a permissive
 // client so they can exercise delivery against a loopback httptest server (the
 // SSRF guard itself is covered by the netguard package tests).
-func newWithClient(store Store, publicURL string, client *http.Client) *Dispatcher {
+func newWithClient(store Store, appURL string, client *http.Client) *Dispatcher {
 	d := &Dispatcher{
 		store:        store,
 		client:       client,
-		publicURL:    strings.TrimRight(strings.TrimSpace(publicURL), "/"),
+		appURL:       strings.TrimRight(strings.TrimSpace(appURL), "/"),
 		events:       make(chan IssueStatusChanged, eventQueueCapacity),
 		jobs:         make(chan deliverJob, queueCapacity),
 		retryBackoff: defaultRetryBackoff,
@@ -376,7 +380,7 @@ func (d *Dispatcher) dispatch(ev IssueStatusChanged) {
 	// so the lookups happen once per event, not once per subscription.
 	enrichCtx, enrichCancel := context.WithTimeout(context.Background(), listTimeout)
 	issueURL := d.buildIssueURL(enrichCtx, wsUUID, ev.Identifier)
-	assigneeName := d.resolveAssigneeName(enrichCtx, ev.AssigneeType, ev.AssigneeID)
+	assigneeName := d.resolveAssigneeName(enrichCtx, wsUUID, ev.AssigneeType, ev.AssigneeID)
 	enrichCancel()
 
 	assigneeType := ev.AssigneeType
@@ -699,9 +703,9 @@ func (d *Dispatcher) markFailed(subID pgtype.UUID, host string) {
 // operator can retry).
 func (d *Dispatcher) TestPush(sub db.WebhookSubscription) bool {
 	// Resolve the workspace slug so the synthetic payload carries a realistic
-	// issue_url when a public URL is configured (best-effort; empty otherwise).
+	// issue_url when an app URL is configured (best-effort; empty otherwise).
 	issueURL := ""
-	if d.publicURL != "" {
+	if d.appURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), listTimeout)
 		issueURL = d.buildIssueURL(ctx, sub.WorkspaceID, "TEST-0")
 		cancel()

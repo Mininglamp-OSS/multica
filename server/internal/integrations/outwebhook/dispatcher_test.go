@@ -185,7 +185,9 @@ func sub(t *testing.T, id, project string, events []string, url string) db.Webho
 // The maps are keyed by UUID string. An absent key returns pgx.ErrNoRows so a
 // test can exercise the "lookup miss → field omitted" path. Default-zero maps
 // (nil) make every lookup miss, so tests that don't care about enrichment are
-// unaffected (issue_url/assignee_name come back empty).
+// unaffected (issue_url/assignee_name come back empty). The assignee getters
+// are workspace-scoped, mirroring the production queries: members are keyed by
+// USER id (assignee_id semantics for type="member"), agents/squads by PK.
 
 func (f *fakeStore) GetWorkspace(_ context.Context, id pgtype.UUID) (db.Workspace, error) {
 	if ws, ok := f.workspaces[util.UUIDToString(id)]; ok {
@@ -194,8 +196,8 @@ func (f *fakeStore) GetWorkspace(_ context.Context, id pgtype.UUID) (db.Workspac
 	return db.Workspace{}, pgx.ErrNoRows
 }
 
-func (f *fakeStore) GetMember(_ context.Context, id pgtype.UUID) (db.Member, error) {
-	if m, ok := f.members[util.UUIDToString(id)]; ok {
+func (f *fakeStore) GetMemberByUserAndWorkspace(_ context.Context, arg db.GetMemberByUserAndWorkspaceParams) (db.Member, error) {
+	if m, ok := f.members[util.UUIDToString(arg.UserID)]; ok && m.WorkspaceID == arg.WorkspaceID {
 		return m, nil
 	}
 	return db.Member{}, pgx.ErrNoRows
@@ -208,15 +210,15 @@ func (f *fakeStore) GetUser(_ context.Context, id pgtype.UUID) (db.User, error) 
 	return db.User{}, pgx.ErrNoRows
 }
 
-func (f *fakeStore) GetAgent(_ context.Context, id pgtype.UUID) (db.Agent, error) {
-	if a, ok := f.agents[util.UUIDToString(id)]; ok {
+func (f *fakeStore) GetAgentInWorkspace(_ context.Context, arg db.GetAgentInWorkspaceParams) (db.Agent, error) {
+	if a, ok := f.agents[util.UUIDToString(arg.ID)]; ok && a.WorkspaceID == arg.WorkspaceID {
 		return a, nil
 	}
 	return db.Agent{}, pgx.ErrNoRows
 }
 
-func (f *fakeStore) GetSquad(_ context.Context, id pgtype.UUID) (db.Squad, error) {
-	if s, ok := f.squads[util.UUIDToString(id)]; ok {
+func (f *fakeStore) GetSquadInWorkspace(_ context.Context, arg db.GetSquadInWorkspaceParams) (db.Squad, error) {
+	if s, ok := f.squads[util.UUIDToString(arg.ID)]; ok && s.WorkspaceID == arg.WorkspaceID {
 		return s, nil
 	}
 	return db.Squad{}, pgx.ErrNoRows

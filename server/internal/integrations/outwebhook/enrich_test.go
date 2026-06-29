@@ -20,23 +20,24 @@ type enrichedPayload struct {
 }
 
 const (
-	memberID = "55555555-5555-5555-5555-555555555555"
-	userID   = "66666666-6666-6666-6666-666666666666"
+	memberID = "55555555-5555-5555-5555-555555555555" // member PK (NOT the assignee_id for type=member)
+	userID   = "66666666-6666-6666-6666-666666666666" // user id == assignee_id for type=member
 	agentID  = "77777777-7777-7777-7777-777777777777"
 	squadID  = "88888888-8888-8888-8888-888888888888"
+	otherWS  = "99999999-9999-9999-9999-999999999999" // a different workspace, for cross-workspace fences
 )
 
-// dispatchOnce runs one event through a publicURL-configured dispatcher against
-// a single workspace-level subscription and returns the delivered payload's
-// enrichment fields.
-func dispatchOnce(t *testing.T, store *fakeStore, publicURL string, ev IssueStatusChanged) enrichedPayload {
+// dispatchOnce runs one event through an appURL-configured dispatcher against a
+// single workspace-level subscription and returns the delivered payload's
+// enrichment fields. The event's workspace is wsID.
+func dispatchOnce(t *testing.T, store *fakeStore, appURL string, ev IssueStatusChanged) enrichedPayload {
 	t.Helper()
 	c := &collector{wg: &sync.WaitGroup{}}
 	srv := httptest.NewServer(http.HandlerFunc(c.handler))
 	defer srv.Close()
 
 	store.subs = []db.WebhookSubscription{sub(t, subID1, "", []string{EventIssueStatusChanged}, srv.URL)}
-	d := newWithClient(store, publicURL, &http.Client{Timeout: deliveryTimeout})
+	d := newWithClient(store, appURL, &http.Client{Timeout: deliveryTimeout})
 	d.retryBackoff = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -78,14 +79,14 @@ func TestEnrich_IssueURL_BuiltFromSlugAndIdentifier(t *testing.T) {
 	}
 }
 
-func TestEnrich_IssueURL_OmittedWithoutPublicURL(t *testing.T) {
+func TestEnrich_IssueURL_OmittedWithoutAppURL(t *testing.T) {
 	store := storeWithWorkspaceSlug("acme")
 	got := dispatchOnce(t, store, "", IssueStatusChanged{
 		Identifier: "MUL-123",
 		Issue:      map[string]any{"identifier": "MUL-123"},
 	})
 	if got.IssueURL != "" {
-		t.Errorf("issue_url = %q, want empty (no public URL configured)", got.IssueURL)
+		t.Errorf("issue_url = %q, want empty (no app URL configured)", got.IssueURL)
 	}
 }
 
@@ -113,14 +114,17 @@ func TestEnrich_IssueURL_EscapesSegments(t *testing.T) {
 }
 
 func TestEnrich_Assignee_Member(t *testing.T) {
+	// For type="member", the event's assignee_id is the USER id (not the member
+	// PK). The member row is keyed by user id in the workspace-scoped fake, and
+	// memberID != userID proves the resolver uses the user id, not the PK.
 	store := storeWithWorkspaceSlug("acme")
-	store.members = map[string]db.Member{memberID: {UserID: mustUUID(t, userID)}}
+	store.members = map[string]db.Member{userID: {ID: mustUUID(t, memberID), UserID: mustUUID(t, userID), WorkspaceID: mustUUID(t, wsID)}}
 	store.users = map[string]db.User{userID: {Name: "张三"}}
 
 	got := dispatchOnce(t, store, "https://app.multica.ai", IssueStatusChanged{
 		Identifier:   "MUL-1",
 		AssigneeType: "member",
-		AssigneeID:   memberID,
+		AssigneeID:   userID, // user id, matching validateAssigneePair semantics
 		Issue:        map[string]any{"identifier": "MUL-1"},
 	})
 	if got.AssigneeType != "member" || got.AssigneeName != "张三" {
@@ -128,9 +132,28 @@ func TestEnrich_Assignee_Member(t *testing.T) {
 	}
 }
 
+func TestEnrich_Assignee_MemberIgnoresMemberPKAsAssigneeID(t *testing.T) {
+	// Regression for the original bug: feeding the member PK as assignee_id (the
+	// wrong key) must NOT resolve — only the user id does. Guards against a
+	// revert to GetMember(memberPK).
+	store := storeWithWorkspaceSlug("acme")
+	store.members = map[string]db.Member{userID: {ID: mustUUID(t, memberID), UserID: mustUUID(t, userID), WorkspaceID: mustUUID(t, wsID)}}
+	store.users = map[string]db.User{userID: {Name: "张三"}}
+
+	got := dispatchOnce(t, store, "https://app.multica.ai", IssueStatusChanged{
+		Identifier:   "MUL-1",
+		AssigneeType: "member",
+		AssigneeID:   memberID, // WRONG key (member PK) — must not resolve
+		Issue:        map[string]any{"identifier": "MUL-1"},
+	})
+	if got.AssigneeName != "" || got.AssigneeType != "" {
+		t.Errorf("assignee = %q/%q, want both empty (member PK is not a valid assignee_id)", got.AssigneeType, got.AssigneeName)
+	}
+}
+
 func TestEnrich_Assignee_Agent(t *testing.T) {
 	store := storeWithWorkspaceSlug("acme")
-	store.agents = map[string]db.Agent{agentID: {Name: "Codex Bot"}}
+	store.agents = map[string]db.Agent{agentID: {Name: "Codex Bot", WorkspaceID: mustUUID(t, wsID)}}
 
 	got := dispatchOnce(t, store, "https://app.multica.ai", IssueStatusChanged{
 		Identifier:   "MUL-1",
@@ -145,7 +168,7 @@ func TestEnrich_Assignee_Agent(t *testing.T) {
 
 func TestEnrich_Assignee_Squad(t *testing.T) {
 	store := storeWithWorkspaceSlug("acme")
-	store.squads = map[string]db.Squad{squadID: {Name: "Platform Squad"}}
+	store.squads = map[string]db.Squad{squadID: {Name: "Platform Squad", WorkspaceID: mustUUID(t, wsID)}}
 
 	got := dispatchOnce(t, store, "https://app.multica.ai", IssueStatusChanged{
 		Identifier:   "MUL-1",
@@ -158,6 +181,24 @@ func TestEnrich_Assignee_Squad(t *testing.T) {
 	}
 }
 
+func TestEnrich_Assignee_CrossWorkspaceFenced(t *testing.T) {
+	// An agent that belongs to a DIFFERENT workspace must not have its name
+	// leaked into this workspace's webhook — the workspace-scoped getter fences
+	// it out even though the agent id resolves globally.
+	store := storeWithWorkspaceSlug("acme")
+	store.agents = map[string]db.Agent{agentID: {Name: "Secret Bot", WorkspaceID: mustUUID(t, otherWS)}}
+
+	got := dispatchOnce(t, store, "https://app.multica.ai", IssueStatusChanged{
+		Identifier:   "MUL-1",
+		AssigneeType: "agent",
+		AssigneeID:   agentID,
+		Issue:        map[string]any{"identifier": "MUL-1"},
+	})
+	if got.AssigneeName != "" || got.AssigneeType != "" {
+		t.Errorf("assignee = %q/%q, want both empty (cross-workspace agent must be fenced)", got.AssigneeType, got.AssigneeName)
+	}
+}
+
 func TestEnrich_Assignee_OmittedWhenUnresolved(t *testing.T) {
 	// assignee_type present but the member row is missing → name can't resolve,
 	// so BOTH assignee_type and assignee_name are dropped (no bare type).
@@ -165,7 +206,7 @@ func TestEnrich_Assignee_OmittedWhenUnresolved(t *testing.T) {
 	got := dispatchOnce(t, store, "https://app.multica.ai", IssueStatusChanged{
 		Identifier:   "MUL-1",
 		AssigneeType: "member",
-		AssigneeID:   memberID, // not in store.members
+		AssigneeID:   userID, // not in store.members
 		Issue:        map[string]any{"identifier": "MUL-1"},
 	})
 	if got.AssigneeType != "" || got.AssigneeName != "" {
@@ -188,7 +229,7 @@ func TestEnrich_Assignee_OmittedWhenUnassigned(t *testing.T) {
 // assignee id returns "" rather than erroring.
 func TestResolveAssigneeName_BadUUID(t *testing.T) {
 	d := &Dispatcher{store: &fakeStore{}}
-	if name := d.resolveAssigneeName(context.Background(), "member", "not-a-uuid"); name != "" {
+	if name := d.resolveAssigneeName(context.Background(), mustUUID(t, wsID), "member", "not-a-uuid"); name != "" {
 		t.Errorf("resolveAssigneeName(bad uuid) = %q, want empty", name)
 	}
 }
