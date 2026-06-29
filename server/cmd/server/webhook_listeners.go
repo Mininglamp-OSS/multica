@@ -37,7 +37,7 @@ func registerWebhookListeners(bus *events.Bus, d *outwebhook.Dispatcher) {
 		if !statusChanged {
 			return
 		}
-		projectID, issue, ok := webhookIssuePayload(payload["issue"])
+		fields, ok := webhookIssuePayload(payload["issue"])
 		if !ok {
 			slog.Debug("webhook listener: unrecognized issue payload shape")
 			return
@@ -46,38 +46,73 @@ func registerWebhookListeners(bus *events.Bus, d *outwebhook.Dispatcher) {
 
 		d.DispatchIssueStatusChanged(outwebhook.IssueStatusChanged{
 			WorkspaceID:    e.WorkspaceID,
-			ProjectID:      projectID,
+			ProjectID:      fields.projectID,
 			ActorType:      e.ActorType,
 			ActorID:        e.ActorID,
 			PreviousStatus: prevStatus,
-			Issue:          issue,
+			Issue:          fields.issue,
+			Identifier:     fields.identifier,
+			AssigneeType:   fields.assigneeType,
+			AssigneeID:     fields.assigneeID,
 		})
 	})
 }
 
-// webhookIssuePayload extracts the project id (for project-level routing) and
-// the issue body to embed in the webhook, from either shape of the issue:updated
-// payload: the typed handler.IssueResponse (handler paths) or the map[string]any
-// emitted by service-layer status changes (e.g. issueToMap). Returns ok=false
-// when neither shape is present.
-func webhookIssuePayload(raw any) (projectID string, issue any, ok bool) {
+// webhookIssueFields is everything the listener extracts from an issue:updated
+// payload in one pass: the project id (project-level routing), the raw issue
+// body to embed verbatim, and the identifier + polymorphic assignee the
+// dispatcher needs to build issue_url + resolve the assignee name. The extraction
+// lives here (not in outwebhook) because reading the typed handler.IssueResponse
+// from outwebhook would be an import cycle (handler imports outwebhook).
+type webhookIssueFields struct {
+	projectID    string
+	issue        any
+	identifier   string
+	assigneeType string
+	assigneeID   string
+}
+
+// webhookIssuePayload extracts webhookIssueFields from either shape of the
+// issue:updated payload: the typed handler.IssueResponse (handler paths) or the
+// map[string]any emitted by service-layer status changes (e.g. issueToMap).
+// Returns ok=false when neither shape is present. Missing fields come back as "".
+func webhookIssuePayload(raw any) (webhookIssueFields, bool) {
 	switch v := raw.(type) {
 	case handler.IssueResponse:
+		f := webhookIssueFields{issue: v, identifier: v.Identifier}
 		if v.ProjectID != nil {
-			projectID = *v.ProjectID
+			f.projectID = *v.ProjectID
 		}
-		return projectID, v, true
+		if v.AssigneeType != nil {
+			f.assigneeType = *v.AssigneeType
+		}
+		if v.AssigneeID != nil {
+			f.assigneeID = *v.AssigneeID
+		}
+		return f, true
 	case map[string]any:
-		switch p := v["project_id"].(type) {
-		case string:
-			projectID = p
-		case *string:
-			if p != nil {
-				projectID = *p
-			}
-		}
-		return projectID, v, true
+		f := webhookIssueFields{issue: v}
+		f.projectID = stringFromMap(v["project_id"])
+		f.identifier, _ = v["identifier"].(string)
+		f.assigneeType = stringFromMap(v["assignee_type"])
+		f.assigneeID = stringFromMap(v["assignee_id"])
+		return f, true
 	default:
-		return "", nil, false
+		return webhookIssueFields{}, false
 	}
+}
+
+// stringFromMap reads a string value from an issue map field that may be a
+// string, a *string (nullable columns serialized by the service layer), or
+// absent/nil.
+func stringFromMap(raw any) string {
+	switch s := raw.(type) {
+	case string:
+		return s
+	case *string:
+		if s != nil {
+			return *s
+		}
+	}
+	return ""
 }

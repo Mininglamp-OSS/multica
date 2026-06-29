@@ -9,37 +9,65 @@ import (
 func strptr(s string) *string { return &s }
 
 func TestWebhookIssuePayload(t *testing.T) {
-	t.Run("typed IssueResponse with project", func(t *testing.T) {
-		issue := handler.IssueResponse{ID: "i1", ProjectID: strptr("proj-1")}
-		projectID, got, ok := webhookIssuePayload(issue)
+	t.Run("typed IssueResponse with project + assignee", func(t *testing.T) {
+		issue := handler.IssueResponse{
+			ID:           "i1",
+			Identifier:   "MUL-1",
+			ProjectID:    strptr("proj-1"),
+			AssigneeType: strptr("member"),
+			AssigneeID:   strptr("mem-1"),
+		}
+		f, ok := webhookIssuePayload(issue)
 		if !ok {
 			t.Fatal("expected ok for IssueResponse")
 		}
-		if projectID != "proj-1" {
-			t.Errorf("projectID = %q, want proj-1", projectID)
+		if f.projectID != "proj-1" {
+			t.Errorf("projectID = %q, want proj-1", f.projectID)
 		}
-		if _, isResp := got.(handler.IssueResponse); !isResp {
+		if f.identifier != "MUL-1" {
+			t.Errorf("identifier = %q, want MUL-1", f.identifier)
+		}
+		if f.assigneeType != "member" || f.assigneeID != "mem-1" {
+			t.Errorf("assignee = %q/%q, want member/mem-1", f.assigneeType, f.assigneeID)
+		}
+		if _, isResp := f.issue.(handler.IssueResponse); !isResp {
 			t.Errorf("issue body should pass through as IssueResponse")
 		}
 	})
 
-	t.Run("typed IssueResponse without project", func(t *testing.T) {
-		projectID, _, ok := webhookIssuePayload(handler.IssueResponse{ID: "i1"})
-		if !ok || projectID != "" {
-			t.Errorf("ok=%v projectID=%q, want ok + empty", ok, projectID)
+	t.Run("typed IssueResponse without project or assignee", func(t *testing.T) {
+		f, ok := webhookIssuePayload(handler.IssueResponse{ID: "i1", Identifier: "MUL-2"})
+		if !ok || f.projectID != "" || f.assigneeType != "" || f.assigneeID != "" {
+			t.Errorf("got %+v ok=%v, want ok + empty project/assignee", f, ok)
+		}
+		if f.identifier != "MUL-2" {
+			t.Errorf("identifier = %q, want MUL-2", f.identifier)
 		}
 	})
 
-	t.Run("map shape with *string project_id (issueToMap)", func(t *testing.T) {
-		m := map[string]any{"id": "i1", "project_id": strptr("proj-2"), "status": "todo"}
-		projectID, got, ok := webhookIssuePayload(m)
+	t.Run("map shape with *string fields (issueToMap)", func(t *testing.T) {
+		m := map[string]any{
+			"id":            "i1",
+			"identifier":    "MUL-3",
+			"project_id":    strptr("proj-2"),
+			"assignee_type": strptr("agent"),
+			"assignee_id":   strptr("agent-9"),
+			"status":        "todo",
+		}
+		f, ok := webhookIssuePayload(m)
 		if !ok {
 			t.Fatal("expected ok for map")
 		}
-		if projectID != "proj-2" {
-			t.Errorf("projectID = %q, want proj-2", projectID)
+		if f.projectID != "proj-2" {
+			t.Errorf("projectID = %q, want proj-2", f.projectID)
 		}
-		if _, isMap := got.(map[string]any); !isMap {
+		if f.identifier != "MUL-3" {
+			t.Errorf("identifier = %q, want MUL-3", f.identifier)
+		}
+		if f.assigneeType != "agent" || f.assigneeID != "agent-9" {
+			t.Errorf("assignee = %q/%q, want agent/agent-9", f.assigneeType, f.assigneeID)
+		}
+		if _, isMap := f.issue.(map[string]any); !isMap {
 			t.Errorf("issue body should pass through as map")
 		}
 	})
@@ -47,25 +75,28 @@ func TestWebhookIssuePayload(t *testing.T) {
 	t.Run("map shape with nil *string project_id (workspace-level)", func(t *testing.T) {
 		var nilp *string
 		m := map[string]any{"id": "i1", "project_id": nilp}
-		projectID, _, ok := webhookIssuePayload(m)
-		if !ok || projectID != "" {
-			t.Errorf("ok=%v projectID=%q, want ok + empty", ok, projectID)
+		f, ok := webhookIssuePayload(m)
+		if !ok || f.projectID != "" {
+			t.Errorf("ok=%v projectID=%q, want ok + empty", ok, f.projectID)
 		}
 	})
 
-	t.Run("map shape with plain string project_id", func(t *testing.T) {
-		m := map[string]any{"id": "i1", "project_id": "proj-3"}
-		projectID, _, ok := webhookIssuePayload(m)
-		if !ok || projectID != "proj-3" {
-			t.Errorf("ok=%v projectID=%q, want proj-3", ok, projectID)
+	t.Run("map shape with plain string fields", func(t *testing.T) {
+		m := map[string]any{"id": "i1", "project_id": "proj-3", "assignee_type": "squad", "assignee_id": "sq-1"}
+		f, ok := webhookIssuePayload(m)
+		if !ok || f.projectID != "proj-3" {
+			t.Errorf("ok=%v projectID=%q, want proj-3", ok, f.projectID)
+		}
+		if f.assigneeType != "squad" || f.assigneeID != "sq-1" {
+			t.Errorf("assignee = %q/%q, want squad/sq-1", f.assigneeType, f.assigneeID)
 		}
 	})
 
 	t.Run("unknown shape", func(t *testing.T) {
-		if _, _, ok := webhookIssuePayload(42); ok {
+		if _, ok := webhookIssuePayload(42); ok {
 			t.Error("expected ok=false for unknown shape")
 		}
-		if _, _, ok := webhookIssuePayload(nil); ok {
+		if _, ok := webhookIssuePayload(nil); ok {
 			t.Error("expected ok=false for nil")
 		}
 	})

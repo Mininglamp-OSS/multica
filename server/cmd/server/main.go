@@ -281,7 +281,7 @@ func main() {
 	registerSubscriberListeners(bus, queries)
 	registerActivityListeners(bus, queries)
 	registerNotificationListeners(bus, queries)
-	webhookDispatcher := outwebhook.New(queries)
+	webhookDispatcher := outwebhook.New(queries, appURLFromEnv())
 	registerWebhookListeners(bus, webhookDispatcher)
 
 	metricsConfig := obsmetrics.ConfigFromEnv()

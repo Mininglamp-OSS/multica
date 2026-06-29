@@ -265,7 +265,7 @@ func TestDispatcher_TestPushAfterCloseReturnsFalse(t *testing.T) {
 	// lifecycle so worker goroutines actually drain rather than leaking
 	// until process exit (Jerry-Xin review).
 	store := &fakeStore{}
-	d := newWithClient(store, &http.Client{Timeout: deliveryTimeout})
+	d := newWithClient(store, "", &http.Client{Timeout: deliveryTimeout})
 	d.retryBackoff = []time.Duration{1 * time.Millisecond, 1 * time.Millisecond}
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

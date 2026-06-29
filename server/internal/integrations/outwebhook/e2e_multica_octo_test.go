@@ -83,8 +83,9 @@ func TestE2E_MulticaOctoWebhook(t *testing.T) {
 	// loopback — fine in production, not fine for a localhost E2E. The
 	// dispatcher's newWithClient takes any client; here we feed it the
 	// default (loopback-permissive) one to exercise the real
-	// signing/marshal/retry path against our local octo.
-	d := newWithClient(q, defaultPermissiveHTTPClient())
+	// signing/marshal/retry path against our local octo. The publicURL is set
+	// so the enriched issue_url is exercised end-to-end through octo's renderer.
+	d := newWithClient(q, "https://app.multica.test", defaultPermissiveHTTPClient())
 	t.Cleanup(func() {
 		closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelClose()
