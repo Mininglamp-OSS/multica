@@ -281,7 +281,7 @@ func main() {
 	registerSubscriberListeners(bus, queries)
 	registerActivityListeners(bus, queries)
 	registerNotificationListeners(bus, queries)
-	webhookDispatcher := outwebhook.New(queries)
+	webhookDispatcher := outwebhook.New(queries, os.Getenv("MULTICA_PUBLIC_URL"))
 	registerWebhookListeners(bus, webhookDispatcher)
 
 	metricsConfig := obsmetrics.ConfigFromEnv()

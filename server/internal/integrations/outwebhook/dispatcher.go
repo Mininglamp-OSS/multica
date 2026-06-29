@@ -88,6 +88,15 @@ type Store interface {
 	// propagated to break delivery.
 	ResetWebhookSubscriptionFailures(ctx context.Context, id pgtype.UUID) error
 	IncrementWebhookSubscriptionFailuresAndMaybeDisable(ctx context.Context, arg db.IncrementWebhookSubscriptionFailuresAndMaybeDisableParams) (db.IncrementWebhookSubscriptionFailuresAndMaybeDisableRow, error)
+	// Read-only lookups for payload enrichment (issue_url + assignee_name).
+	// All best-effort on the dispatch worker: a failed lookup degrades the
+	// enriched field to empty, never blocks delivery. Backed by existing sqlc
+	// queries — no new SQL.
+	GetWorkspace(ctx context.Context, id pgtype.UUID) (db.Workspace, error)
+	GetMember(ctx context.Context, id pgtype.UUID) (db.Member, error)
+	GetUser(ctx context.Context, id pgtype.UUID) (db.User, error)
+	GetAgent(ctx context.Context, id pgtype.UUID) (db.Agent, error)
+	GetSquad(ctx context.Context, id pgtype.UUID) (db.Squad, error)
 }
 
 // recordTimeout bounds the best-effort delivery-history write so a slow DB can
@@ -134,6 +143,7 @@ type deliverJob struct {
 type Dispatcher struct {
 	store        Store
 	client       *http.Client
+	publicURL    string // absolute base URL (no trailing slash) for building issue_url; "" disables links
 	events       chan IssueStatusChanged
 	jobs         chan deliverJob
 	retryBackoff []time.Duration
@@ -154,17 +164,20 @@ type Dispatcher struct {
 // New builds a Dispatcher and starts its worker pools. The HTTP client is
 // SSRF-restricted (rejects internal addresses at dial time, on every redirect
 // hop) and carries a fixed per-request timeout; retries are handled per attempt.
-func New(store Store) *Dispatcher {
-	return newWithClient(store, netguard.NewRestrictedHTTPClient(deliveryTimeout))
+// publicURL is the absolute base URL (no trailing slash) used to build issue_url
+// links in the payload; pass "" to omit links.
+func New(store Store, publicURL string) *Dispatcher {
+	return newWithClient(store, publicURL, netguard.NewRestrictedHTTPClient(deliveryTimeout))
 }
 
 // newWithClient is the shared constructor. Tests use it to inject a permissive
 // client so they can exercise delivery against a loopback httptest server (the
 // SSRF guard itself is covered by the netguard package tests).
-func newWithClient(store Store, client *http.Client) *Dispatcher {
+func newWithClient(store Store, publicURL string, client *http.Client) *Dispatcher {
 	d := &Dispatcher{
 		store:        store,
 		client:       client,
+		publicURL:    strings.TrimRight(strings.TrimSpace(publicURL), "/"),
 		events:       make(chan IssueStatusChanged, eventQueueCapacity),
 		jobs:         make(chan deliverJob, queueCapacity),
 		retryBackoff: defaultRetryBackoff,
@@ -270,6 +283,13 @@ type IssueStatusChanged struct {
 	ActorID        string
 	PreviousStatus string
 	Issue          any
+	// Identifier / AssigneeType / AssigneeID are pulled out of the issue body by
+	// the listener (which can read the typed handler.IssueResponse without an
+	// import cycle) so the dispatcher can enrich the payload with issue_url +
+	// assignee_name without depending on the handler package. Any may be "".
+	Identifier   string
+	AssigneeType string
+	AssigneeID   string
 }
 
 // actorPayload mirrors the {type,id} shape used elsewhere for polymorphic actors.
@@ -280,12 +300,24 @@ type actorPayload struct {
 
 // outboundPayload is the versioned JSON body POSTed to subscribers.
 type outboundPayload struct {
-	Event          string       `json:"event"`
-	WorkspaceID    string       `json:"workspace_id"`
-	Actor          actorPayload `json:"actor"`
-	Issue          any          `json:"issue"`
-	PreviousStatus string       `json:"previous_status"`
-	DeliveredAt    string       `json:"delivered_at"`
+	Event       string       `json:"event"`
+	WorkspaceID string       `json:"workspace_id"`
+	Actor       actorPayload `json:"actor"`
+	Issue       any          `json:"issue"`
+	// IssueURL is the absolute web URL of the issue, built from the public base
+	// URL + workspace slug + issue identifier. Omitted when the public URL is
+	// unset or the slug/identifier could not be resolved (receivers degrade to
+	// no link). Additive: older receivers ignore it.
+	IssueURL string `json:"issue_url,omitempty"`
+	// AssigneeType / AssigneeName describe the issue's current assignee in
+	// human-readable form (the issue object itself carries only assignee_id /
+	// assignee_type UUIDs). AssigneeName is the resolved display name (member
+	// user name / agent name / squad name). Both omitted when the issue is
+	// unassigned or the name could not be resolved.
+	AssigneeType   string `json:"assignee_type,omitempty"`
+	AssigneeName   string `json:"assignee_name,omitempty"`
+	PreviousStatus string `json:"previous_status"`
+	DeliveredAt    string `json:"delivered_at"`
 }
 
 // DispatchIssueStatusChanged hands the event to the bounded dispatch queue and
@@ -337,11 +369,32 @@ func (d *Dispatcher) dispatch(ev IssueStatusChanged) {
 		return
 	}
 
+	// Enrich the payload with a clickable issue_url and a human-readable
+	// assignee name. Both are best-effort: a failed lookup degrades the field to
+	// empty (omitempty drops it) and never blocks delivery. Runs here on the
+	// dispatch worker — off the request path, before the per-subscription fanout
+	// so the lookups happen once per event, not once per subscription.
+	enrichCtx, enrichCancel := context.WithTimeout(context.Background(), listTimeout)
+	issueURL := d.buildIssueURL(enrichCtx, wsUUID, ev.Identifier)
+	assigneeName := d.resolveAssigneeName(enrichCtx, ev.AssigneeType, ev.AssigneeID)
+	enrichCancel()
+
+	assigneeType := ev.AssigneeType
+	if assigneeName == "" {
+		// Don't surface a bare assignee_type with no name — receivers can't
+		// render anything useful from "member" alone, and an unresolved name
+		// usually means the issue is unassigned or the lookup failed.
+		assigneeType = ""
+	}
+
 	body, err := json.Marshal(outboundPayload{
 		Event:          EventIssueStatusChanged,
 		WorkspaceID:    ev.WorkspaceID,
 		Actor:          actorPayload{Type: ev.ActorType, ID: ev.ActorID},
 		Issue:          ev.Issue,
+		IssueURL:       issueURL,
+		AssigneeType:   assigneeType,
+		AssigneeName:   assigneeName,
 		PreviousStatus: ev.PreviousStatus,
 		DeliveredAt:    time.Now().UTC().Format(time.RFC3339),
 	})
@@ -645,6 +698,14 @@ func (d *Dispatcher) markFailed(subID pgtype.UUID, host string) {
 // Returns false if the delivery queue is full (transient back-pressure; the
 // operator can retry).
 func (d *Dispatcher) TestPush(sub db.WebhookSubscription) bool {
+	// Resolve the workspace slug so the synthetic payload carries a realistic
+	// issue_url when a public URL is configured (best-effort; empty otherwise).
+	issueURL := ""
+	if d.publicURL != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), listTimeout)
+		issueURL = d.buildIssueURL(ctx, sub.WorkspaceID, "TEST-0")
+		cancel()
+	}
 	body, err := json.Marshal(outboundPayload{
 		Event:       EventIssueStatusChanged,
 		WorkspaceID: util.UUIDToString(sub.WorkspaceID),
@@ -654,6 +715,9 @@ func (d *Dispatcher) TestPush(sub db.WebhookSubscription) bool {
 			"title":      "Multica webhook test push",
 			"status":     "in_progress",
 		},
+		IssueURL:       issueURL,
+		AssigneeType:   "agent",
+		AssigneeName:   "Multica Bot",
 		PreviousStatus: "todo",
 		DeliveredAt:    time.Now().UTC().Format(time.RFC3339),
 	})

@@ -43,6 +43,7 @@ func registerWebhookListeners(bus *events.Bus, d *outwebhook.Dispatcher) {
 			return
 		}
 		prevStatus, _ := payload["prev_status"].(string)
+		identifier, assigneeType, assigneeID := webhookIssueEnrichFields(payload["issue"])
 
 		d.DispatchIssueStatusChanged(outwebhook.IssueStatusChanged{
 			WorkspaceID:    e.WorkspaceID,
@@ -51,8 +52,49 @@ func registerWebhookListeners(bus *events.Bus, d *outwebhook.Dispatcher) {
 			ActorID:        e.ActorID,
 			PreviousStatus: prevStatus,
 			Issue:          issue,
+			Identifier:     identifier,
+			AssigneeType:   assigneeType,
+			AssigneeID:     assigneeID,
 		})
 	})
+}
+
+// webhookIssueEnrichFields pulls the identifier + polymorphic assignee
+// (assignee_type / assignee_id) out of either issue payload shape so the
+// dispatcher can build issue_url + resolve the assignee name without importing
+// the handler package (which imports outwebhook — an import cycle). Missing
+// fields come back as "".
+func webhookIssueEnrichFields(raw any) (identifier, assigneeType, assigneeID string) {
+	switch v := raw.(type) {
+	case handler.IssueResponse:
+		identifier = v.Identifier
+		if v.AssigneeType != nil {
+			assigneeType = *v.AssigneeType
+		}
+		if v.AssigneeID != nil {
+			assigneeID = *v.AssigneeID
+		}
+	case map[string]any:
+		identifier, _ = v["identifier"].(string)
+		assigneeType = stringFromMap(v["assignee_type"])
+		assigneeID = stringFromMap(v["assignee_id"])
+	}
+	return identifier, assigneeType, assigneeID
+}
+
+// stringFromMap reads a string value from an issue map field that may be a
+// string, a *string (nullable columns serialized by the service layer), or
+// absent/nil.
+func stringFromMap(raw any) string {
+	switch s := raw.(type) {
+	case string:
+		return s
+	case *string:
+		if s != nil {
+			return *s
+		}
+	}
+	return ""
 }
 
 // webhookIssuePayload extracts the project id (for project-level routing) and

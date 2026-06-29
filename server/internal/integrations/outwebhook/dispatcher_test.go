@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/util"
@@ -40,6 +41,13 @@ type fakeStore struct {
 	failuresByID   map[string]int32
 	enabledByID    map[string]bool
 	disabledReason map[string]string
+
+	// Enrichment lookup tables (issue_url + assignee_name), keyed by UUID string.
+	workspaces map[string]db.Workspace
+	members    map[string]db.Member
+	users      map[string]db.User
+	agents     map[string]db.Agent
+	squads     map[string]db.Squad
 }
 
 func (f *fakeStore) ListEnabledWebhookSubscriptionsForDispatch(_ context.Context, _ pgtype.UUID) ([]db.WebhookSubscription, error) {
@@ -129,7 +137,7 @@ func (f *fakeStore) incrementParams() []db.IncrementWebhookSubscriptionFailuresA
 // Close on cleanup so worker goroutines never leak across tests.
 func newTestDispatcher(t *testing.T, store Store, client *http.Client) *Dispatcher {
 	t.Helper()
-	d := newWithClient(store, client)
+	d := newWithClient(store, "", client)
 	d.retryBackoff = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -170,6 +178,48 @@ func sub(t *testing.T, id, project string, events []string, url string) db.Webho
 		s.ProjectID = mustUUID(t, project)
 	}
 	return s
+}
+
+// --- enrichment lookup stubs (issue_url + assignee_name) ---
+//
+// The maps are keyed by UUID string. An absent key returns pgx.ErrNoRows so a
+// test can exercise the "lookup miss → field omitted" path. Default-zero maps
+// (nil) make every lookup miss, so tests that don't care about enrichment are
+// unaffected (issue_url/assignee_name come back empty).
+
+func (f *fakeStore) GetWorkspace(_ context.Context, id pgtype.UUID) (db.Workspace, error) {
+	if ws, ok := f.workspaces[util.UUIDToString(id)]; ok {
+		return ws, nil
+	}
+	return db.Workspace{}, pgx.ErrNoRows
+}
+
+func (f *fakeStore) GetMember(_ context.Context, id pgtype.UUID) (db.Member, error) {
+	if m, ok := f.members[util.UUIDToString(id)]; ok {
+		return m, nil
+	}
+	return db.Member{}, pgx.ErrNoRows
+}
+
+func (f *fakeStore) GetUser(_ context.Context, id pgtype.UUID) (db.User, error) {
+	if u, ok := f.users[util.UUIDToString(id)]; ok {
+		return u, nil
+	}
+	return db.User{}, pgx.ErrNoRows
+}
+
+func (f *fakeStore) GetAgent(_ context.Context, id pgtype.UUID) (db.Agent, error) {
+	if a, ok := f.agents[util.UUIDToString(id)]; ok {
+		return a, nil
+	}
+	return db.Agent{}, pgx.ErrNoRows
+}
+
+func (f *fakeStore) GetSquad(_ context.Context, id pgtype.UUID) (db.Squad, error) {
+	if s, ok := f.squads[util.UUIDToString(id)]; ok {
+		return s, nil
+	}
+	return db.Squad{}, pgx.ErrNoRows
 }
 
 func TestSubscriptionMatches(t *testing.T) {
@@ -339,7 +389,7 @@ func TestProductionClientBlocksInternalDelivery(t *testing.T) {
 	}}
 	// Use the production constructor to prove New() wires the SSRF-restricted
 	// client. Short backoff + Close-on-cleanup keep it fast and leak-free.
-	d := New(store)
+	d := New(store, "")
 	d.retryBackoff = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
