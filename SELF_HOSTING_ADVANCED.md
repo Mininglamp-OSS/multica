@@ -94,7 +94,7 @@ For file uploads and attachments, configure S3 and (optionally) CloudFront:
 | `S3_REGION` | AWS region (default: `us-west-2`). Must match the bucket's actual region — used for both SDK signing and public URLs |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Static credentials. When both are unset, the AWS SDK default credential chain is used |
 | `AWS_ENDPOINT_URL` | Custom S3-compatible endpoint (e.g. MinIO, R2, B2). Setting this switches to path-style URLs |
-| `S3_KEY_PREFIX` | Optional object key prefix (e.g. `multica-prod`) for sharing one bucket/CDN domain with other apps. Leading/trailing slashes are trimmed. Leave unset to keep the existing unprefixed keys. **Set it before the first upload** — changing it later does not migrate already-uploaded objects, so their downloads start 404ing and deletes silently no-op until you copy them under the new prefix yourself |
+| `S3_KEY_PREFIX` | Optional object key prefix (e.g. `multica-prod`) for sharing one bucket/CDN domain with other apps. Surrounding whitespace and leading/trailing slashes are trimmed. Leave unset to keep the existing unprefixed keys. **Set it before the first upload** — changing it later does not migrate already-uploaded objects, so their downloads start 404ing and deletes silently no-op until you copy them under the new prefix yourself |
 | `ATTACHMENT_DOWNLOAD_MODE` | Attachment download behavior: `auto` (default), `cloudfront`, `presign`, or `proxy`. Use `proxy` for private buckets behind Docker/VPC-only endpoints such as `http://rustfs:9000` |
 | `ATTACHMENT_DOWNLOAD_URL_TTL` | TTL for CloudFront signed URLs and S3 presigned download URLs (default: `30m`) |
 | `CLOUDFRONT_DOMAIN` | CloudFront distribution domain — when set, public URLs use this host instead of the S3 host |

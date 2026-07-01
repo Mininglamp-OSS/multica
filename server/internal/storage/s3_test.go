@@ -200,6 +200,99 @@ func TestS3StorageKeyFromURL_NoPrefixConfiguredLeavesKeyIntact(t *testing.T) {
 	}
 }
 
+func TestS3StorageKeyFromURL_PrefixConfiguredButURLKeyDoesNotMatch(t *testing.T) {
+	// A URL for an object that was never written under the configured prefix
+	// (e.g. legacy data uploaded before S3_KEY_PREFIX was set, or a foreign
+	// key) must come back unchanged rather than being mangled.
+	s := &S3Storage{
+		bucket:    "test-bucket",
+		region:    "us-east-1",
+		keyPrefix: "multica-prod",
+	}
+
+	rawURL := "https://test-bucket.s3.us-east-1.amazonaws.com/uploads/abc/file.png"
+
+	if got := s.KeyFromURL(rawURL); got != "uploads/abc/file.png" {
+		t.Fatalf("KeyFromURL(%q) = %q, want %q", rawURL, got, "uploads/abc/file.png")
+	}
+}
+
+func TestS3StorageUploadedURL_WithPrefix(t *testing.T) {
+	// Locks the exact composition Upload performs: uploadedURL(objectKey(key)).
+	const key = "uploads/abc/file.png"
+
+	cases := []struct {
+		name        string
+		bucket      string
+		region      string
+		cdnDomain   string
+		endpointURL string
+		keyPrefix   string
+		want        string
+	}{
+		{
+			name:      "cdn domain includes prefix",
+			bucket:    "test-bucket",
+			region:    "us-east-1",
+			cdnDomain: "cdn.example.com",
+			keyPrefix: "multica-prod",
+			want:      "https://cdn.example.com/multica-prod/uploads/abc/file.png",
+		},
+		{
+			name:        "custom endpoint includes prefix",
+			bucket:      "test-bucket",
+			region:      "us-east-1",
+			endpointURL: "http://localhost:9000",
+			keyPrefix:   "multica-prod",
+			want:        "http://localhost:9000/test-bucket/multica-prod/uploads/abc/file.png",
+		},
+		{
+			name:      "default aws virtual hosted style includes prefix",
+			bucket:    "test-bucket",
+			region:    "us-east-1",
+			keyPrefix: "multica-prod",
+			want:      "https://test-bucket.s3.us-east-1.amazonaws.com/multica-prod/uploads/abc/file.png",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &S3Storage{
+				bucket:      tc.bucket,
+				region:      tc.region,
+				cdnDomain:   tc.cdnDomain,
+				endpointURL: tc.endpointURL,
+				keyPrefix:   tc.keyPrefix,
+			}
+			if got := s.uploadedURL(s.objectKey(key)); got != tc.want {
+				t.Fatalf("uploadedURL(objectKey(%q)) = %q, want %q", key, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeKeyPrefix(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty stays empty", raw: "", want: ""},
+		{name: "plain value is unchanged", raw: "multica-prod", want: "multica-prod"},
+		{name: "leading and trailing slashes are trimmed", raw: "/multica-prod/", want: "multica-prod"},
+		{name: "slash-only value normalizes to empty", raw: "/", want: ""},
+		{name: "surrounding whitespace is trimmed", raw: "  multica-prod  ", want: "multica-prod"},
+		{name: "whitespace and slashes both trimmed", raw: " /multica-prod/ ", want: "multica-prod"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeKeyPrefix(tc.raw); got != tc.want {
+				t.Fatalf("normalizeKeyPrefix(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestS3StoragePresignGet_AppliesConfiguredPrefix(t *testing.T) {
 	store := &S3Storage{
 		client: s3.New(s3.Options{

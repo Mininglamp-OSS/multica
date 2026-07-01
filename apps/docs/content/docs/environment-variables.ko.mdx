@@ -86,7 +86,7 @@ Multica는 사용자가 업로드한 첨부 파일(댓글의 이미지와 파일
 | `S3_REGION` | `us-west-2` | AWS 리전. 버킷의 실제 리전과 일치해야 합니다 — SDK 서명과 공개 URL 구성 모두에 사용됩니다 |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 비어 있음 | 정적 자격 증명. 둘 다 설정하지 않으면 AWS SDK 기본 자격 증명 체인(IAM role / 환경 자격 증명)이 사용됩니다 |
 | `AWS_ENDPOINT_URL` | 비어 있음 | 사용자 정의 S3 호환 엔드포인트 (예: [MinIO](https://min.io/)). 이를 설정하면 path-style URL로 전환됩니다 |
-| `S3_KEY_PREFIX` | 비어 있음 | 선택적 객체 key 접두사 (예: `multica-prod`). 하나의 버킷/CDN 도메인을 다른 애플리케이션과 공유할 때 유용합니다. 앞뒤 슬래시는 자동으로 제거됩니다. 비워두면 기존의 접두사 없는 key가 그대로 유지됩니다. **첫 업로드 전에 반드시 설정하세요** — 나중에 변경하면 기존에 업로드된 객체는 마이그레이션되지 않아 다운로드는 404가 되고 삭제는 조용히 무시됩니다. 새 접두사 아래로 직접 복사하지 않는 한 복구되지 않습니다 |
+| `S3_KEY_PREFIX` | 비어 있음 | 선택적 객체 key 접두사 (예: `multica-prod`). 하나의 버킷/CDN 도메인을 다른 애플리케이션과 공유할 때 유용합니다. 앞뒤 공백과 슬래시는 자동으로 제거됩니다. 비워두면 기존의 접두사 없는 key가 그대로 유지됩니다. **첫 업로드 전에 반드시 설정하세요** — 나중에 변경하면 기존에 업로드된 객체는 마이그레이션되지 않아 다운로드는 404가 되고 삭제는 조용히 무시됩니다. 새 접두사 아래로 직접 복사하지 않는 한 복구되지 않습니다 |
 | `ATTACHMENT_DOWNLOAD_MODE` | `auto` | 첨부 파일 다운로드 방식: `auto`, `cloudfront`, `presign`, `proxy`. `auto`에서는 CloudFront가 완전히 설정되어 있으면 우선 사용하고, 내부/프라이빗 endpoint host는 server proxy를, 공개 S3 호환 endpoint는 지원되는 경우 presigned GET을 사용합니다 |
 | `ATTACHMENT_DOWNLOAD_URL_TTL` | `30m` | CloudFront signed URL 및 S3 presigned download URL의 유효 기간. Go duration 형식을 받습니다 |
 

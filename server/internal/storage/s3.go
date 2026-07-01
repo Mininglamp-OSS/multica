@@ -33,10 +33,10 @@ type S3Storage struct {
 //   - S3_BUCKET (required)
 //   - S3_REGION (default: us-west-2)
 //   - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (optional; falls back to default credential chain)
-//   - S3_KEY_PREFIX (optional; leading/trailing slashes are trimmed. Set it
-//     before the first upload — changing it later does not migrate
-//     already-uploaded objects, so they become unreachable under the new
-//     prefix until manually copied)
+//   - S3_KEY_PREFIX (optional; surrounding whitespace and leading/trailing
+//     slashes are trimmed. Set it before the first upload — changing it
+//     later does not migrate already-uploaded objects, so they become
+//     unreachable under the new prefix until manually copied)
 func NewS3StorageFromEnv() *S3Storage {
 	bucket := os.Getenv("S3_BUCKET")
 	if bucket == "" {
@@ -84,7 +84,7 @@ func NewS3StorageFromEnv() *S3Storage {
 		})
 	}
 
-	keyPrefix := strings.Trim(os.Getenv("S3_KEY_PREFIX"), "/")
+	keyPrefix := normalizeKeyPrefix(os.Getenv("S3_KEY_PREFIX"))
 
 	slog.Info("S3 storage initialized", "bucket", bucket, "region", region, "cdn_domain", cdnDomain, "endpoint_url", endpointURL, "key_prefix", keyPrefix)
 	return &S3Storage{
@@ -108,6 +108,13 @@ func (s *S3Storage) CdnDomain() string {
 // "<bucket>.s3.<region>.amazonaws.com" into S3_BUCKET.
 func looksLikeS3Hostname(bucket string) bool {
 	return strings.Contains(bucket, "amazonaws.com")
+}
+
+// normalizeKeyPrefix trims surrounding whitespace and slashes from a raw
+// S3_KEY_PREFIX value, e.g. " /multica-prod/ " -> "multica-prod". A
+// slash-only value normalizes to "" (no prefix).
+func normalizeKeyPrefix(raw string) string {
+	return strings.Trim(strings.TrimSpace(raw), "/")
 }
 
 // objectKey applies the configured key prefix (if any) to a logical key,
