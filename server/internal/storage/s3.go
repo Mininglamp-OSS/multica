@@ -94,6 +94,12 @@ func NewS3StorageFromEnv() *S3Storage {
 			"value", keyPrefix,
 		)
 	}
+	if keyPrefixHasUnsafeCharacters(keyPrefix) {
+		slog.Warn(
+			"S3_KEY_PREFIX contains characters outside [A-Za-z0-9._/-] — these are concatenated raw into public URLs (no escaping), so spaces, query/fragment characters, or control characters can produce malformed URLs even though S3 itself would accept the object key.",
+			"value", keyPrefix,
+		)
+	}
 
 	slog.Info("S3 storage initialized", "bucket", bucket, "region", region, "cdn_domain", cdnDomain, "endpoint_url", endpointURL, "key_prefix", keyPrefix)
 	return &S3Storage{
@@ -134,6 +140,25 @@ func normalizeKeyPrefix(raw string) string {
 // segment, but the logical key briefly round-trips through a wrong value.
 func keyPrefixCollidesWithLogicalRoot(prefix string) bool {
 	return prefix == "users" || prefix == "workspaces"
+}
+
+// keyPrefixHasUnsafeCharacters reports whether prefix contains characters
+// outside the conservative charset object keys and raw string-concatenated
+// URLs tolerate without escaping (see uploadedURL). S3 itself accepts a much
+// wider key charset, but a prefix with spaces, query/fragment characters, or
+// control characters corrupts the public URLs this package builds.
+func keyPrefixHasUnsafeCharacters(prefix string) bool {
+	for _, r := range prefix {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			continue
+		case r == '-' || r == '_' || r == '.' || r == '/':
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // objectKey applies the configured key prefix (if any) to a logical key,
@@ -265,13 +290,13 @@ func (s *S3Storage) Delete(ctx context.Context, key string) {
 	if key == "" {
 		return
 	}
-	objectKey := s.objectKey(key)
+	objKey := s.objectKey(key)
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(objectKey),
+		Key:    aws.String(objKey),
 	})
 	if err != nil {
-		slog.Error("s3 DeleteObject failed", "key", objectKey, "error", err)
+		slog.Error("s3 DeleteObject failed", "key", objKey, "error", err)
 	}
 }
 
@@ -283,10 +308,10 @@ func (s *S3Storage) DeleteKeys(ctx context.Context, keys []string) {
 }
 
 func (s *S3Storage) Upload(ctx context.Context, key string, data []byte, contentType string, filename string) (string, error) {
-	objectKey := s.objectKey(key)
+	objKey := s.objectKey(key)
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:             aws.String(s.bucket),
-		Key:                aws.String(objectKey),
+		Key:                aws.String(objKey),
 		Body:               bytes.NewReader(data),
 		ContentType:        aws.String(contentType),
 		ContentDisposition: aws.String(ContentDisposition(contentType, filename)),
@@ -296,7 +321,7 @@ func (s *S3Storage) Upload(ctx context.Context, key string, data []byte, content
 	if err != nil {
 		return "", fmt.Errorf("s3 PutObject: %w", err)
 	}
-	return s.uploadedURL(objectKey), nil
+	return s.uploadedURL(objKey), nil
 }
 
 // uploadedURL returns the URL stored for client consumption after an upload.

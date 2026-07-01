@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -312,6 +314,29 @@ func TestKeyPrefixCollidesWithLogicalRoot(t *testing.T) {
 	}
 }
 
+func TestKeyPrefixHasUnsafeCharacters(t *testing.T) {
+	cases := []struct {
+		prefix string
+		want   bool
+	}{
+		{prefix: "", want: false},
+		{prefix: "multica-prod", want: false},
+		{prefix: "multica_prod.v2", want: false},
+		{prefix: "org/team/multica-prod", want: false},
+		{prefix: "multica prod", want: true},
+		{prefix: "multica-prod?x=1", want: true},
+		{prefix: "multica-prod#frag", want: true},
+		{prefix: "multica\tprod", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.prefix, func(t *testing.T) {
+			if got := keyPrefixHasUnsafeCharacters(tc.prefix); got != tc.want {
+				t.Fatalf("keyPrefixHasUnsafeCharacters(%q) = %v, want %v", tc.prefix, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestS3StoragePresignGet_AppliesConfiguredPrefix(t *testing.T) {
 	store := &S3Storage{
 		client: s3.New(s3.Options{
@@ -328,6 +353,66 @@ func TestS3StoragePresignGet_AppliesConfiguredPrefix(t *testing.T) {
 	}
 	if !strings.Contains(got, "https://test-bucket.s3.us-east-1.amazonaws.com/multica-prod/uploads/abc/file.txt") {
 		t.Fatalf("presigned URL %q does not contain prefixed key", got)
+	}
+}
+
+func TestS3StorageDelete_AppliesConfiguredPrefix(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	s := &S3Storage{
+		client: s3.New(s3.Options{
+			Region:       "us-east-1",
+			Credentials:  aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider("AKID", "SECRET", "")),
+			BaseEndpoint: aws.String(srv.URL),
+			UsePathStyle: true,
+		}),
+		bucket:    "test-bucket",
+		keyPrefix: "multica-prod",
+	}
+
+	s.Delete(context.Background(), "uploads/abc/file.png")
+
+	want := "/test-bucket/multica-prod/uploads/abc/file.png"
+	if gotPath != want {
+		t.Fatalf("DeleteObject request path = %q, want %q", gotPath, want)
+	}
+}
+
+func TestS3StorageGetReader_AppliesConfiguredPrefix(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("body"))
+	}))
+	defer srv.Close()
+
+	s := &S3Storage{
+		client: s3.New(s3.Options{
+			Region:       "us-east-1",
+			Credentials:  aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider("AKID", "SECRET", "")),
+			BaseEndpoint: aws.String(srv.URL),
+			UsePathStyle: true,
+		}),
+		bucket:    "test-bucket",
+		keyPrefix: "multica-prod",
+	}
+
+	reader, err := s.GetReader(context.Background(), "uploads/abc/file.png")
+	if err != nil {
+		t.Fatalf("GetReader: %v", err)
+	}
+	reader.Close()
+
+	want := "/test-bucket/multica-prod/uploads/abc/file.png"
+	if gotPath != want {
+		t.Fatalf("GetObject request path = %q, want %q", gotPath, want)
 	}
 }
 
