@@ -54,12 +54,13 @@ func (m *fakeMinter) Mint(_ context.Context, workspaceID, installationID pgtype.
 	return BindingToken{Raw: m.rawToken}, nil
 }
 
-func replierInst() db.OctoInstallation {
-	return db.OctoInstallation{
+func replierInst() db.ChannelInstallation {
+	return db.ChannelInstallation{
 		ID:          validUUID(0xAA),
 		WorkspaceID: validUUID(0xBB),
+		ChannelType: string(TypeOcto),
 		Status:      "active",
-		ApiUrl:      "https://im.example/api",
+		Config:      []byte(`{"app_id":"robot_x","api_url":"https://im.example/api"}`),
 	}
 }
 
@@ -74,10 +75,9 @@ func TestOutcomeReplier_NeedsBinding_DMsSenderWithLink(t *testing.T) {
 	})
 
 	inst := replierInst()
-	msg := InboundMessage{ChannelID: "grp_1", ChannelType: ChannelGroup, SenderUID: "uid_42"}
-	res := DispatchResult{Outcome: OutcomeNeedsBinding, InstallationID: inst.ID, SenderUID: "uid_42"}
+	rc := replyContext{ChannelID: "grp_1", ChannelType: ChannelGroup, SenderUID: "uid_42", Outcome: OutcomeNeedsBinding}
 
-	r.Reply(context.Background(), inst, msg, res)
+	r.Reply(context.Background(), inst, rc)
 
 	if minter.calls != 1 {
 		t.Fatalf("Mint called %d times, want 1", minter.calls)
@@ -118,8 +118,7 @@ func TestOutcomeReplier_NeedsBinding_NoPublicURL_Downgrades(t *testing.T) {
 	})
 
 	inst := replierInst()
-	res := DispatchResult{Outcome: OutcomeNeedsBinding, InstallationID: inst.ID, SenderUID: "uid_42"}
-	r.Reply(context.Background(), inst, InboundMessage{}, res)
+	r.Reply(context.Background(), inst, replyContext{Outcome: OutcomeNeedsBinding, SenderUID: "uid_42"})
 
 	if minter.calls != 0 {
 		t.Errorf("Mint should not be called without a public URL, got %d calls", minter.calls)
@@ -139,8 +138,8 @@ func TestOutcomeReplier_AgentOffline_NotifiesChannel(t *testing.T) {
 	})
 
 	inst := replierInst()
-	msg := InboundMessage{ChannelID: "grp_1", ChannelType: ChannelGroup, SenderUID: "uid_42"}
-	r.Reply(context.Background(), inst, msg, DispatchResult{Outcome: OutcomeAgentOffline})
+	rc := replyContext{ChannelID: "grp_1", ChannelType: ChannelGroup, SenderUID: "uid_42", Outcome: OutcomeAgentOffline}
+	r.Reply(context.Background(), inst, rc)
 
 	if len(sender.calls) != 1 {
 		t.Fatalf("Send called %d times, want 1", len(sender.calls))
@@ -166,8 +165,7 @@ func TestOutcomeReplier_AgentArchived_NotifiesChannel(t *testing.T) {
 	})
 
 	r.Reply(context.Background(), replierInst(),
-		InboundMessage{ChannelID: "dm_1", ChannelType: ChannelDM},
-		DispatchResult{Outcome: OutcomeAgentArchived})
+		replyContext{ChannelID: "dm_1", ChannelType: ChannelDM, Outcome: OutcomeAgentArchived})
 
 	if len(sender.calls) != 1 || sender.calls[0].content != agentArchivedCopy {
 		t.Fatalf("expected one archived notice with archived copy, got %+v", sender.calls)
@@ -185,7 +183,7 @@ func TestOutcomeReplier_IngestedAndDropped_Silent(t *testing.T) {
 	})
 
 	for _, oc := range []Outcome{OutcomeIngested, OutcomeDropped} {
-		r.Reply(context.Background(), replierInst(), InboundMessage{ChannelID: "c"}, DispatchResult{Outcome: oc})
+		r.Reply(context.Background(), replierInst(), replyContext{ChannelID: "c", Outcome: oc})
 	}
 	if len(sender.calls) != 0 || minter.calls != 0 {
 		t.Errorf("ingested/dropped must produce no reply, got %d sends %d mints", len(sender.calls), minter.calls)
@@ -215,6 +213,6 @@ func TestOutcomeReplier_BestEffort_SwallowsSendError(t *testing.T) {
 		PublicURL: "https://multica.example",
 	})
 	// Should not panic.
-	r.Reply(context.Background(), replierInst(), InboundMessage{},
-		DispatchResult{Outcome: OutcomeNeedsBinding, SenderUID: "uid_42"})
+	r.Reply(context.Background(), replierInst(),
+		replyContext{Outcome: OutcomeNeedsBinding, SenderUID: "uid_42"})
 }

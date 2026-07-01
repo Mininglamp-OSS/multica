@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -53,9 +54,10 @@ func TestInstallationService_UpsertDecryptRoundTrip(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// Ciphertext must not be the plaintext.
-	if string(inst.BotTokenEncrypted) == token {
-		t.Fatal("bot token stored in plaintext")
+	// Ciphertext must not be the plaintext: the token is sealed inside the
+	// channel_installation.config blob, never stored in the clear.
+	if strings.Contains(string(inst.Config), token) {
+		t.Fatal("bot token stored in plaintext in config")
 	}
 
 	// DecryptBotToken round-trips to the original.
@@ -166,8 +168,10 @@ func TestInstallationService_Revoke(t *testing.T) {
 	if err := svc.Revoke(ctx, inst.ID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	active, _ := q.ListActiveOctoInstallations(ctx)
-	if containsInstallation(active, inst.ID) {
-		t.Error("revoked installation still active")
+	active, _ := q.ListActiveChannelInstallations(ctx, string(octo.TypeOcto))
+	for _, a := range active {
+		if a.ID == inst.ID {
+			t.Error("revoked installation still active")
+		}
 	}
 }

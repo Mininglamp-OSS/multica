@@ -16,7 +16,11 @@ func TestBindingToken_MintRedeemRoundTrip(t *testing.T) {
 	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t)
-	inst := newInstallation(t, q, wsID, userID, agentID)
+	instSvc, err := octo.NewInstallationService(q, newBox(t))
+	if err != nil {
+		t.Fatalf("NewInstallationService: %v", err)
+	}
+	inst := newInstallation(t, instSvc, wsID, userID, agentID)
 	ctx := context.Background()
 
 	svc := octo.NewBindingTokenService(q, testPool)
@@ -37,11 +41,11 @@ func TestBindingToken_MintRedeemRoundTrip(t *testing.T) {
 	}
 
 	// The binding now resolves via the inbound identity query.
-	binding, err := q.GetOctoUserBindingByUID(ctx, db.GetOctoUserBindingByUIDParams{
-		InstallationID: inst.ID, OctoUid: "octo_uid_1",
+	binding, err := q.GetChannelUserBindingByUserID(ctx, db.GetChannelUserBindingByUserIDParams{
+		InstallationID: inst.ID, ChannelUserID: "octo_uid_1",
 	})
 	if err != nil {
-		t.Fatalf("GetOctoUserBindingByUID after bind: %v", err)
+		t.Fatalf("GetChannelUserBindingByUserID after bind: %v", err)
 	}
 	if binding.MulticaUserID != userID {
 		t.Errorf("binding points at wrong user")
@@ -52,7 +56,7 @@ func TestBindingToken_SingleUse(t *testing.T) {
 	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t)
-	inst := newInstallation(t, q, wsID, userID, agentID)
+	inst := newInstallation(t, mustInstallSvc(t, q), wsID, userID, agentID)
 	ctx := context.Background()
 
 	svc := octo.NewBindingTokenService(q, testPool)
@@ -73,7 +77,7 @@ func TestBindingToken_Expired(t *testing.T) {
 	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t)
-	inst := newInstallation(t, q, wsID, userID, agentID)
+	inst := newInstallation(t, mustInstallSvc(t, q), wsID, userID, agentID)
 	ctx := context.Background()
 
 	// Clock 20 minutes in the past so the 15-min token is already expired.
@@ -103,7 +107,7 @@ func TestBindingToken_NotWorkspaceMember(t *testing.T) {
 	requireDB(t)
 	q := db.New(testPool)
 	wsID, userID, agentID := fixture(t)
-	inst := newInstallation(t, q, wsID, userID, agentID)
+	inst := newInstallation(t, mustInstallSvc(t, q), wsID, userID, agentID)
 	ctx := context.Background()
 
 	// A second user who is NOT a member of this workspace.

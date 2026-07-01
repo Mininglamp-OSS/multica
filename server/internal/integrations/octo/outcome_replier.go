@@ -14,21 +14,19 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// OutcomeReplier reacts to the Dispatcher's verdict by sending the appropriate
-// reply back to Octo. It is the outbound half of the inbound pipeline that the
-// Patcher does not own: the Patcher relays the agent's eventual chat reply
-// (chat:done / task:failed), while the replier handles the synchronous,
-// pre-agent outcomes — NeedsBinding (DM the unbound sender a one-shot binding
-// link), AgentOffline / AgentArchived (tell the user the agent can't run).
-// OutcomeIngested and OutcomeDropped produce no reply here.
+// OutcomeReplier reacts to the engine's verdict by sending the appropriate reply
+// back to Octo. It is the outbound half of the inbound pipeline the Patcher does
+// not own: the Patcher relays the agent's eventual chat reply (chat:done /
+// task:failed), while the replier handles the synchronous, pre-agent outcomes —
+// NeedsBinding (DM the unbound sender a one-shot binding link), AgentOffline /
+// AgentArchived (tell the user the agent can't run). OutcomeIngested and
+// OutcomeDropped produce no reply here.
 //
 // Reply is best-effort by design: a transient Octo outage MUST NOT fail the
-// inbound pipeline. For NeedsBinding the message was not stored, and for the
-// agent-unavailable outcomes the chat_message is already durable, so there is
-// nothing to roll back. Errors are logged and swallowed; the next inbound
-// message from the same user retries the reply on its own.
+// inbound pipeline. Errors are logged and swallowed; the next inbound message
+// from the same user retries the reply on its own.
 type OutcomeReplier interface {
-	Reply(ctx context.Context, inst db.OctoInstallation, msg InboundMessage, res DispatchResult)
+	Reply(ctx context.Context, inst db.ChannelInstallation, rc replyContext)
 }
 
 // BindingMinter mints a single-use binding token. Satisfied by
@@ -39,21 +37,20 @@ type BindingMinter interface {
 }
 
 // noopReplier is the safe default when the integration is wired without the
-// dependencies the production replier needs (no binding service, no public
-// URL). It logs each outcome that would have produced a reply so the gap is
-// visible in production logs.
+// dependencies the production replier needs (no binding service, no public URL).
+// It logs each outcome that would have produced a reply so the gap is visible.
 type noopReplier struct {
 	log *slog.Logger
 }
 
-func (n *noopReplier) Reply(_ context.Context, inst db.OctoInstallation, msg InboundMessage, res DispatchResult) {
-	switch res.Outcome {
+func (n *noopReplier) Reply(_ context.Context, inst db.ChannelInstallation, rc replyContext) {
+	switch rc.Outcome {
 	case OutcomeNeedsBinding, OutcomeAgentOffline, OutcomeAgentArchived:
 		n.log.Warn("octo outcome replier: outbound reply skipped (replier not wired)",
-			"outcome", string(res.Outcome),
+			"outcome", string(rc.Outcome),
 			"installation_id", uuidString(inst.ID),
-			"channel_id", string(msg.ChannelID),
-			"sender_uid", string(res.SenderUID),
+			"channel_id", rc.ChannelID,
+			"sender_uid", string(rc.SenderUID),
 		)
 	}
 }
@@ -126,29 +123,29 @@ func NewOutcomeReplier(cfg OutcomeReplierConfig) OutcomeReplier {
 // Reply implements OutcomeReplier. The switch is the SOURCE OF TRUTH for which
 // outcomes generate a reply; a missing branch silently drops the user-visible
 // side effect.
-func (r *octoOutcomeReplier) Reply(ctx context.Context, inst db.OctoInstallation, msg InboundMessage, res DispatchResult) {
-	switch res.Outcome {
+func (r *octoOutcomeReplier) Reply(ctx context.Context, inst db.ChannelInstallation, rc replyContext) {
+	switch rc.Outcome {
 	case OutcomeNeedsBinding:
-		if err := r.sendBindingPrompt(ctx, inst, res); err != nil {
+		if err := r.sendBindingPrompt(ctx, inst, rc); err != nil {
 			r.log.Warn("octo outcome replier: binding prompt failed",
 				"installation_id", uuidString(inst.ID),
-				"sender_uid", string(res.SenderUID),
+				"sender_uid", string(rc.SenderUID),
 				"err", err.Error(),
 			)
 		}
 	case OutcomeAgentOffline:
-		if err := r.sendDM(ctx, inst, msg.ChannelID, msg.ChannelType, agentOfflineCopy); err != nil {
+		if err := r.sendDM(ctx, inst, rc.ChannelID, rc.ChannelType, agentOfflineCopy); err != nil {
 			r.log.Warn("octo outcome replier: offline notice failed",
 				"installation_id", uuidString(inst.ID),
-				"channel_id", string(msg.ChannelID),
+				"channel_id", rc.ChannelID,
 				"err", err.Error(),
 			)
 		}
 	case OutcomeAgentArchived:
-		if err := r.sendDM(ctx, inst, msg.ChannelID, msg.ChannelType, agentArchivedCopy); err != nil {
+		if err := r.sendDM(ctx, inst, rc.ChannelID, rc.ChannelType, agentArchivedCopy); err != nil {
 			r.log.Warn("octo outcome replier: archived notice failed",
 				"installation_id", uuidString(inst.ID),
-				"channel_id", string(msg.ChannelID),
+				"channel_id", rc.ChannelID,
 				"err", err.Error(),
 			)
 		}
@@ -162,30 +159,30 @@ func (r *octoOutcomeReplier) Reply(ctx context.Context, inst db.OctoInstallation
 // redeem it. The DM goes to the sender's own uid as a 1:1 channel — even when
 // the triggering message arrived in a group, the binding prompt is private so a
 // group is never spammed with binding links.
-func (r *octoOutcomeReplier) sendBindingPrompt(ctx context.Context, inst db.OctoInstallation, res DispatchResult) error {
-	if res.SenderUID == "" {
+func (r *octoOutcomeReplier) sendBindingPrompt(ctx context.Context, inst db.ChannelInstallation, rc replyContext) error {
+	if rc.SenderUID == "" {
 		return errors.New("missing sender uid")
 	}
 	if r.publicURL == "" {
 		return errors.New("public_url not configured")
 	}
-	token, err := r.minter.Mint(ctx, inst.WorkspaceID, inst.ID, res.SenderUID)
+	token, err := r.minter.Mint(ctx, inst.WorkspaceID, inst.ID, rc.SenderUID)
 	if err != nil {
 		return fmt.Errorf("mint binding token: %w", err)
 	}
 	bindURL := r.publicURL + r.bindingPath + "?token=" + url.QueryEscape(token.Raw)
-	return r.sendDM(ctx, inst, ChannelID(res.SenderUID), ChannelDM, bindingPromptText(bindURL))
+	return r.sendDM(ctx, inst, string(rc.SenderUID), ChannelDM, bindingPromptText(bindURL))
 }
 
 // sendDM decrypts the installation's bot token and sends content to the given
 // channel. Used for both the binding prompt (sender's DM channel) and the
 // agent-unavailable notices (the originating channel).
-func (r *octoOutcomeReplier) sendDM(ctx context.Context, inst db.OctoInstallation, channelID ChannelID, channelType ChannelType, content string) error {
+func (r *octoOutcomeReplier) sendDM(ctx context.Context, inst db.ChannelInstallation, channelID string, channelType ChannelType, content string) error {
 	token, err := r.decryptor.DecryptBotToken(inst)
 	if err != nil {
 		return fmt.Errorf("decrypt bot token: %w", err)
 	}
-	if _, err := r.sender.Send(ctx, inst.ApiUrl, token, string(channelID), transport.ChannelType(channelType), content); err != nil {
+	if _, err := r.sender.Send(ctx, installationAPIURL(inst), token, channelID, transport.ChannelType(channelType), content); err != nil {
 		return fmt.Errorf("send message: %w", err)
 	}
 	return nil

@@ -2,6 +2,7 @@ package octo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,28 +14,32 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/octo/transport"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 const outboundEventTimeout = 10 * time.Second
 
-// PatcherQueries is the subset of generated queries the outbound patcher needs.
+func uuidString(u pgtype.UUID) string { return util.UUIDToString(u) }
+
+// PatcherQueries is the subset of generated queries the outbound patcher needs,
+// now backed by the generalized channel_* tables (channel_type='octo').
 type PatcherQueries interface {
-	GetOctoChatSessionBindingBySession(ctx context.Context, chatSessionID pgtype.UUID) (db.OctoChatSessionBinding, error)
-	GetOctoInstallation(ctx context.Context, id pgtype.UUID) (db.OctoInstallation, error)
-	CreateOctoOutboundMessage(ctx context.Context, arg db.CreateOctoOutboundMessageParams) (db.OctoOutboundMessage, error)
+	GetChannelChatSessionBindingBySession(ctx context.Context, arg db.GetChannelChatSessionBindingBySessionParams) (db.ChannelChatSessionBinding, error)
+	GetChannelInstallation(ctx context.Context, arg db.GetChannelInstallationParams) (db.ChannelInstallation, error)
+	CreateChannelOutboundCardMessage(ctx context.Context, arg db.CreateChannelOutboundCardMessageParams) (db.ChannelOutboundCardMessage, error)
 }
 
-// TokenDecryptor decrypts an installation's stored bot token ciphertext. An
-// interface so the patcher can be unit-tested without secretbox.
+// TokenDecryptor decrypts an installation's stored bot token. An interface so
+// the patcher can be unit-tested without secretbox.
 type TokenDecryptor interface {
-	DecryptBotToken(inst db.OctoInstallation) (string, error)
+	DecryptBotToken(inst db.ChannelInstallation) (string, error)
 }
 
 // MessageSender sends an outbound message to Octo for a given installation.
-// Production uses octoMessageSender (a thin wrapper over transport.HTTPClient); tests
-// provide a fake. Returns the server-assigned message id/seq.
+// Production uses octoMessageSender (a thin wrapper over transport.HTTPClient);
+// tests provide a fake. Returns the server-assigned message id/seq.
 type MessageSender interface {
 	Send(ctx context.Context, apiURL, botToken, channelID string, channelType transport.ChannelType, content string) (*transport.SendMessageResult, error)
 }
@@ -75,8 +80,9 @@ func (s *octoMessageSender) Send(ctx context.Context, apiURL, botToken, channelI
 
 // Patcher subscribes to chat task events and relays agent output back to Octo.
 // On chat:done it sends the agent's reply; on task:failed it sends a short error
-// notice. Octo renders markdown natively, so replies go out as plain text/markdown
-// (no interactive-card rendering like Lark).
+// notice. Octo renders markdown natively, so replies go out as plain
+// text/markdown. It coexists with the Feishu / Slack outbound subscribers on the
+// shared event bus: sessions with no Octo binding are ignored.
 type Patcher struct {
 	queries   PatcherQueries
 	decryptor TokenDecryptor
@@ -116,16 +122,22 @@ func (p *Patcher) processEvent(ctx context.Context, e events.Event) error {
 		return nil
 	}
 
-	binding, err := p.queries.GetOctoChatSessionBindingBySession(ctx, chatSessionID)
+	binding, err := p.queries.GetChannelChatSessionBindingBySession(ctx, db.GetChannelChatSessionBindingBySessionParams{
+		ChatSessionID: chatSessionID,
+		ChannelType:   string(TypeOcto),
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			// Web-only or Lark chat session — not an Octo target.
+			// Not an Octo session (Feishu / Slack / web-only).
 			return nil
 		}
 		return fmt.Errorf("lookup chat session binding: %w", err)
 	}
 
-	inst, err := p.queries.GetOctoInstallation(ctx, binding.InstallationID)
+	inst, err := p.queries.GetChannelInstallation(ctx, db.GetChannelInstallationParams{
+		ID:          binding.InstallationID,
+		ChannelType: string(TypeOcto),
+	})
 	if err != nil {
 		return fmt.Errorf("load installation: %w", err)
 	}
@@ -138,12 +150,13 @@ func (p *Patcher) processEvent(ctx context.Context, e events.Event) error {
 	if err != nil {
 		return fmt.Errorf("decrypt bot token: %w", err)
 	}
+	apiURL := installationAPIURL(inst)
 
 	switch e.Type {
 	case protocol.EventChatDone:
-		return p.sendReply(ctx, inst, binding, taskID, chatDoneContent(e.Payload), token)
+		return p.sendReply(ctx, apiURL, binding, taskID, chatDoneContent(e.Payload), token)
 	case protocol.EventTaskFailed:
-		return p.sendReply(ctx, inst, binding, taskID, "⚠️ "+failureMessageFromPayload(e.Payload), token)
+		return p.sendReply(ctx, apiURL, binding, taskID, "⚠️ "+failureMessageFromPayload(e.Payload), token)
 	}
 	return nil
 }
@@ -151,37 +164,59 @@ func (p *Patcher) processEvent(ctx context.Context, e events.Event) error {
 // sendReply sends content to the bound Octo channel and records the sent message
 // (keyed by task) so a later streaming edit can target it. Empty content is
 // dropped — better to show nothing than a bare "Done.".
-func (p *Patcher) sendReply(ctx context.Context, inst db.OctoInstallation, binding db.OctoChatSessionBinding, taskID pgtype.UUID, content, token string) error {
+func (p *Patcher) sendReply(ctx context.Context, apiURL string, binding db.ChannelChatSessionBinding, taskID pgtype.UUID, content, token string) error {
 	if content == "" {
 		return nil
 	}
-	res, err := p.sender.Send(ctx, inst.ApiUrl, token, binding.OctoChannelID, transport.ChannelType(binding.OctoChannelType), content)
+	res, err := p.sender.Send(ctx, apiURL, token, binding.ChannelChatID, bindingChannelType(binding), content)
 	if err != nil {
 		return fmt.Errorf("send message: %w", err)
 	}
 
 	// Record the sent message so future streaming edits can find it. Best-effort:
 	// a failure here only loses the edit anchor, not the delivered message.
-	var seq int64
-	if res != nil {
-		seq = int64(res.MessageSeq)
-	}
 	msgID := ""
 	if res != nil {
 		msgID = res.MessageID
 	}
-	if _, err := p.queries.CreateOctoOutboundMessage(ctx, db.CreateOctoOutboundMessageParams{
-		ChatSessionID:  binding.ChatSessionID,
-		TaskID:         taskID,
-		OctoChannelID:  binding.OctoChannelID,
-		OctoMessageID:  msgID,
-		OctoMessageSeq: seq,
-		Status:         "final",
+	if _, err := p.queries.CreateChannelOutboundCardMessage(ctx, db.CreateChannelOutboundCardMessageParams{
+		ChatSessionID:        binding.ChatSessionID,
+		TaskID:               taskID,
+		ChannelType:          string(TypeOcto),
+		ChannelChatID:        binding.ChannelChatID,
+		ChannelCardMessageID: msgID,
+		Status:               "final",
 	}); err != nil {
 		p.logger.Warn("octo outbound: record sent message failed",
 			"task_id", uuidString(taskID), "err", err.Error())
 	}
 	return nil
+}
+
+// bindingChannelType reads the numeric WuKongIM channel type off the binding
+// config (persisted by the session binder); it defaults to the group channel
+// type when absent so a reply still lands.
+func bindingChannelType(binding db.ChannelChatSessionBinding) transport.ChannelType {
+	var cfg octoBindingConfig
+	if len(binding.Config) > 0 {
+		_ = json.Unmarshal(binding.Config, &cfg)
+	}
+	if cfg.ChannelType == 0 {
+		if binding.ChatType == "p2p" {
+			return transport.ChannelDM
+		}
+		return transport.ChannelGroup
+	}
+	return transport.ChannelType(cfg.ChannelType)
+}
+
+// installationAPIURL reads the Octo REST base URL out of the installation config.
+func installationAPIURL(inst db.ChannelInstallation) string {
+	var cfg installConfig
+	if len(inst.Config) > 0 {
+		_ = json.Unmarshal(inst.Config, &cfg)
+	}
+	return cfg.APIURL
 }
 
 // taskAndSessionFromEvent extracts task_id + chat_session_id from the event,
