@@ -135,6 +135,90 @@ func TestS3StorageKeyFromURL_LegacyBucketOnlyHostStillRoundTrips(t *testing.T) {
 	}
 }
 
+func TestS3StorageObjectKey(t *testing.T) {
+	cases := []struct {
+		name      string
+		keyPrefix string
+		key       string
+		want      string
+	}{
+		{
+			name: "no prefix configured leaves key unchanged",
+			key:  "users/u1/file.png",
+			want: "users/u1/file.png",
+		},
+		{
+			name:      "prefix is prepended with a separating slash",
+			keyPrefix: "multica-prod",
+			key:       "users/u1/file.png",
+			want:      "multica-prod/users/u1/file.png",
+		},
+		{
+			name:      "workspace key gets prefixed the same way",
+			keyPrefix: "multica-prod",
+			key:       "workspaces/w1/file.png",
+			want:      "multica-prod/workspaces/w1/file.png",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &S3Storage{keyPrefix: tc.keyPrefix}
+			if got := s.objectKey(tc.key); got != tc.want {
+				t.Fatalf("objectKey(%q) = %q, want %q", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestS3StorageKeyFromURL_StripsConfiguredPrefix(t *testing.T) {
+	s := &S3Storage{
+		bucket:    "test-bucket",
+		region:    "us-east-1",
+		keyPrefix: "multica-prod",
+	}
+
+	rawURL := "https://test-bucket.s3.us-east-1.amazonaws.com/multica-prod/uploads/abc/file.png"
+
+	if got := s.KeyFromURL(rawURL); got != "uploads/abc/file.png" {
+		t.Fatalf("KeyFromURL(%q) = %q, want %q", rawURL, got, "uploads/abc/file.png")
+	}
+}
+
+func TestS3StorageKeyFromURL_NoPrefixConfiguredLeavesKeyIntact(t *testing.T) {
+	// Guards against accidentally stripping a path segment that merely looks
+	// like a prefix when S3_KEY_PREFIX is not configured.
+	s := &S3Storage{
+		bucket: "test-bucket",
+		region: "us-east-1",
+	}
+
+	rawURL := "https://test-bucket.s3.us-east-1.amazonaws.com/multica-prod/uploads/abc/file.png"
+
+	if got := s.KeyFromURL(rawURL); got != "multica-prod/uploads/abc/file.png" {
+		t.Fatalf("KeyFromURL(%q) = %q, want %q", rawURL, got, "multica-prod/uploads/abc/file.png")
+	}
+}
+
+func TestS3StoragePresignGet_AppliesConfiguredPrefix(t *testing.T) {
+	store := &S3Storage{
+		client: s3.New(s3.Options{
+			Region:      "us-east-1",
+			Credentials: aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider("AKID", "SECRET", "")),
+		}),
+		bucket:    "test-bucket",
+		keyPrefix: "multica-prod",
+	}
+
+	got, err := store.PresignGet(context.Background(), "uploads/abc/file.txt", 5*time.Minute)
+	if err != nil {
+		t.Fatalf("PresignGet: %v", err)
+	}
+	if !strings.Contains(got, "https://test-bucket.s3.us-east-1.amazonaws.com/multica-prod/uploads/abc/file.txt") {
+		t.Fatalf("presigned URL %q does not contain prefixed key", got)
+	}
+}
+
 func TestLooksLikeS3Hostname(t *testing.T) {
 	cases := []struct {
 		bucket string

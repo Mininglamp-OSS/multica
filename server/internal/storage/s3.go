@@ -23,6 +23,7 @@ type S3Storage struct {
 	region      string // used to construct virtual-hosted-style public URLs when no CDN/endpoint is set
 	cdnDomain   string // if set, returned URLs use this instead of bucket name
 	endpointURL string // if set, use path-style URLs (e.g. MinIO)
+	keyPrefix   string // if set, prepended to every object key so a bucket/CDN domain can be shared with other apps
 }
 
 // NewS3StorageFromEnv creates an S3Storage from environment variables.
@@ -32,6 +33,10 @@ type S3Storage struct {
 //   - S3_BUCKET (required)
 //   - S3_REGION (default: us-west-2)
 //   - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (optional; falls back to default credential chain)
+//   - S3_KEY_PREFIX (optional; leading/trailing slashes are trimmed. Set it
+//     before the first upload — changing it later does not migrate
+//     already-uploaded objects, so they become unreachable under the new
+//     prefix until manually copied)
 func NewS3StorageFromEnv() *S3Storage {
 	bucket := os.Getenv("S3_BUCKET")
 	if bucket == "" {
@@ -79,13 +84,16 @@ func NewS3StorageFromEnv() *S3Storage {
 		})
 	}
 
-	slog.Info("S3 storage initialized", "bucket", bucket, "region", region, "cdn_domain", cdnDomain, "endpoint_url", endpointURL)
+	keyPrefix := strings.Trim(os.Getenv("S3_KEY_PREFIX"), "/")
+
+	slog.Info("S3 storage initialized", "bucket", bucket, "region", region, "cdn_domain", cdnDomain, "endpoint_url", endpointURL, "key_prefix", keyPrefix)
 	return &S3Storage{
 		client:      s3.NewFromConfig(cfg, s3Opts...),
 		bucket:      bucket,
 		region:      region,
 		cdnDomain:   cdnDomain,
 		endpointURL: endpointURL,
+		keyPrefix:   keyPrefix,
 	}
 }
 
@@ -102,6 +110,26 @@ func looksLikeS3Hostname(bucket string) bool {
 	return strings.Contains(bucket, "amazonaws.com")
 }
 
+// objectKey applies the configured key prefix (if any) to a logical key,
+// producing the actual key used against the S3 API. Callers throughout the
+// rest of the codebase only ever deal in logical keys (e.g. "users/u1/f.png");
+// this is the single point where the prefix is introduced.
+func (s *S3Storage) objectKey(key string) string {
+	if s.keyPrefix == "" {
+		return key
+	}
+	return s.keyPrefix + "/" + key
+}
+
+// stripKeyPrefix removes the configured key prefix from an S3 object key,
+// recovering the logical key. It is the inverse of objectKey.
+func (s *S3Storage) stripKeyPrefix(key string) string {
+	if s.keyPrefix == "" {
+		return key
+	}
+	return strings.TrimPrefix(key, s.keyPrefix+"/")
+}
+
 // storageClass returns the appropriate S3 storage class.
 // Custom endpoints (e.g. MinIO) only support STANDARD; real AWS defaults to INTELLIGENT_TIERING.
 func (s *S3Storage) storageClass() types.StorageClass {
@@ -116,6 +144,12 @@ func (s *S3Storage) storageClass() types.StorageClass {
 //
 //	"https://my-bucket.s3.us-east-1.amazonaws.com/uploads/x/y.png" → "uploads/x/y.png"
 func (s *S3Storage) KeyFromURL(rawURL string) string {
+	return s.stripKeyPrefix(s.rawKeyFromURL(rawURL))
+}
+
+// rawKeyFromURL parses the object key out of a CDN or bucket URL as it is
+// physically stored in S3, i.e. including the configured key prefix (if any).
+func (s *S3Storage) rawKeyFromURL(rawURL string) string {
 	if s.endpointURL != "" {
 		prefix := strings.TrimRight(s.endpointURL, "/") + "/" + s.bucket + "/"
 		if strings.HasPrefix(rawURL, prefix) {
@@ -165,7 +199,7 @@ func (s *S3Storage) GetReader(ctx context.Context, key string) (io.ReadCloser, e
 	}
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(s.objectKey(key)),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("s3 GetObject: %w", err)
@@ -186,7 +220,7 @@ func (s *S3Storage) PresignGetWithContentDisposition(ctx context.Context, key st
 	}
 	input := &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(s.objectKey(key)),
 	}
 	if contentDisposition != "" {
 		input.ResponseContentDisposition = aws.String(contentDisposition)
@@ -205,12 +239,13 @@ func (s *S3Storage) Delete(ctx context.Context, key string) {
 	if key == "" {
 		return
 	}
+	objectKey := s.objectKey(key)
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(objectKey),
 	})
 	if err != nil {
-		slog.Error("s3 DeleteObject failed", "key", key, "error", err)
+		slog.Error("s3 DeleteObject failed", "key", objectKey, "error", err)
 	}
 }
 
@@ -222,9 +257,10 @@ func (s *S3Storage) DeleteKeys(ctx context.Context, keys []string) {
 }
 
 func (s *S3Storage) Upload(ctx context.Context, key string, data []byte, contentType string, filename string) (string, error) {
+	objectKey := s.objectKey(key)
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:             aws.String(s.bucket),
-		Key:                aws.String(key),
+		Key:                aws.String(objectKey),
 		Body:               bytes.NewReader(data),
 		ContentType:        aws.String(contentType),
 		ContentDisposition: aws.String(ContentDisposition(contentType, filename)),
@@ -234,7 +270,7 @@ func (s *S3Storage) Upload(ctx context.Context, key string, data []byte, content
 	if err != nil {
 		return "", fmt.Errorf("s3 PutObject: %w", err)
 	}
-	return s.uploadedURL(key), nil
+	return s.uploadedURL(objectKey), nil
 }
 
 // uploadedURL returns the URL stored for client consumption after an upload.
