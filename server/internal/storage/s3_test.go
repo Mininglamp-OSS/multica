@@ -94,6 +94,39 @@ func TestS3StorageKeyFromURL_CustomEndpointWithTrailingSlash(t *testing.T) {
 	}
 }
 
+func TestS3StorageKeyFromURL_CustomEndpointVirtualHostedStyle(t *testing.T) {
+	// Tencent COS (and some other S3-compatible backends) reject path-style
+	// requests with PathStyleDomainForbidden and require the bucket in the
+	// hostname instead.
+	s := &S3Storage{
+		bucket:             "test-bucket",
+		endpointURL:        "https://cos.ap-guangzhou.myqcloud.com",
+		virtualHostedStyle: true,
+	}
+
+	rawURL := "https://test-bucket.cos.ap-guangzhou.myqcloud.com/uploads/abc/file.png"
+
+	if got := s.KeyFromURL(rawURL); got != "uploads/abc/file.png" {
+		t.Fatalf("KeyFromURL(%q) = %q, want %q", rawURL, got, "uploads/abc/file.png")
+	}
+}
+
+func TestS3StorageKeyFromURL_CustomEndpointVirtualHostedStyle_StillParsesLegacyPathStyleURLs(t *testing.T) {
+	// If an operator flips S3_FORCE_PATH_STYLE after objects were already
+	// uploaded in path-style, old stored URLs must keep resolving.
+	s := &S3Storage{
+		bucket:             "test-bucket",
+		endpointURL:        "https://cos.ap-guangzhou.myqcloud.com",
+		virtualHostedStyle: true,
+	}
+
+	rawURL := "https://cos.ap-guangzhou.myqcloud.com/test-bucket/uploads/abc/file.png"
+
+	if got := s.KeyFromURL(rawURL); got != "uploads/abc/file.png" {
+		t.Fatalf("KeyFromURL(%q) = %q, want %q", rawURL, got, "uploads/abc/file.png")
+	}
+}
+
 func TestS3StorageKeyFromURL_VirtualHostedStylePreservesNestedKey(t *testing.T) {
 	s := &S3Storage{
 		bucket: "test-bucket",
@@ -273,6 +306,28 @@ func TestS3StorageUploadedURL_WithPrefix(t *testing.T) {
 	}
 }
 
+func TestParseForcePathStyle(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "unset defaults to true (path-style, matches pre-existing behavior)", raw: "", want: true},
+		{name: "true", raw: "true", want: true},
+		{name: "false opts into virtual-hosted style", raw: "false", want: false},
+		{name: "1 parses as true", raw: "1", want: true},
+		{name: "0 parses as false", raw: "0", want: false},
+		{name: "invalid value defaults to true", raw: "not-a-bool", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseForcePathStyle(tc.raw); got != tc.want {
+				t.Fatalf("parseForcePathStyle(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeKeyPrefix(t *testing.T) {
 	cases := []struct {
 		name string
@@ -440,12 +495,13 @@ func TestS3StorageUploadedURL(t *testing.T) {
 	const key = "uploads/abc/file.png"
 
 	cases := []struct {
-		name        string
-		bucket      string
-		region      string
-		cdnDomain   string
-		endpointURL string
-		want        string
+		name               string
+		bucket             string
+		region             string
+		cdnDomain          string
+		endpointURL        string
+		virtualHostedStyle bool
+		want               string
 	}{
 		{
 			name:   "default aws virtual hosted style",
@@ -488,18 +544,63 @@ func TestS3StorageUploadedURL(t *testing.T) {
 			endpointURL: "http://localhost:9000",
 			want:        "https://cdn.example.com/uploads/abc/file.png",
 		},
+		{
+			name:               "custom endpoint virtual-hosted style (e.g. Tencent COS)",
+			bucket:             "test-bucket",
+			endpointURL:        "https://cos.ap-guangzhou.myqcloud.com",
+			virtualHostedStyle: true,
+			want:               "https://test-bucket.cos.ap-guangzhou.myqcloud.com/uploads/abc/file.png",
+		},
+		{
+			name:               "custom endpoint virtual-hosted style with trailing slash",
+			bucket:             "test-bucket",
+			endpointURL:        "https://cos.ap-guangzhou.myqcloud.com/",
+			virtualHostedStyle: true,
+			want:               "https://test-bucket.cos.ap-guangzhou.myqcloud.com/uploads/abc/file.png",
+		},
+		{
+			name:               "custom endpoint virtual-hosted style preserves http scheme",
+			bucket:             "test-bucket",
+			endpointURL:        "http://localhost:9000",
+			virtualHostedStyle: true,
+			want:               "http://test-bucket.localhost:9000/uploads/abc/file.png",
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &S3Storage{
-				bucket:      tc.bucket,
-				region:      tc.region,
-				cdnDomain:   tc.cdnDomain,
-				endpointURL: tc.endpointURL,
+				bucket:             tc.bucket,
+				region:             tc.region,
+				cdnDomain:          tc.cdnDomain,
+				endpointURL:        tc.endpointURL,
+				virtualHostedStyle: tc.virtualHostedStyle,
 			}
 			if got := s.uploadedURL(key); got != tc.want {
 				t.Fatalf("uploadedURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSplitEndpointURL(t *testing.T) {
+	cases := []struct {
+		endpoint   string
+		wantScheme string
+		wantHost   string
+		wantOK     bool
+	}{
+		{endpoint: "https://cos.ap-guangzhou.myqcloud.com", wantScheme: "https", wantHost: "cos.ap-guangzhou.myqcloud.com", wantOK: true},
+		{endpoint: "https://cos.ap-guangzhou.myqcloud.com/", wantScheme: "https", wantHost: "cos.ap-guangzhou.myqcloud.com", wantOK: true},
+		{endpoint: "http://localhost:9000", wantScheme: "http", wantHost: "localhost:9000", wantOK: true},
+		{endpoint: "", wantOK: false},
+		{endpoint: "cos.ap-guangzhou.myqcloud.com", wantOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			scheme, host, ok := splitEndpointURL(tc.endpoint)
+			if ok != tc.wantOK || scheme != tc.wantScheme || host != tc.wantHost {
+				t.Fatalf("splitEndpointURL(%q) = (%q, %q, %v), want (%q, %q, %v)", tc.endpoint, scheme, host, ok, tc.wantScheme, tc.wantHost, tc.wantOK)
 			}
 		})
 	}

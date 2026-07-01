@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,12 +19,13 @@ import (
 )
 
 type S3Storage struct {
-	client      *s3.Client
-	bucket      string
-	region      string // used to construct virtual-hosted-style public URLs when no CDN/endpoint is set
-	cdnDomain   string // if set, returned URLs use this instead of bucket name
-	endpointURL string // if set, use path-style URLs (e.g. MinIO)
-	keyPrefix   string // if set, prepended to every object key so a bucket/CDN domain can be shared with other apps
+	client             *s3.Client
+	bucket             string
+	region             string // used to construct virtual-hosted-style public URLs when no CDN/endpoint is set
+	cdnDomain          string // if set, returned URLs use this instead of bucket name
+	endpointURL        string // if set, use a custom endpoint (e.g. MinIO, Tencent COS) instead of AWS S3
+	virtualHostedStyle bool   // if true, use <bucket>.<endpoint-host> instead of path-style with endpointURL; some backends (e.g. Tencent COS) reject path-style with PathStyleDomainForbidden
+	keyPrefix          string // if set, prepended to every object key so a bucket/CDN domain can be shared with other apps
 }
 
 // NewS3StorageFromEnv creates an S3Storage from environment variables.
@@ -33,6 +35,11 @@ type S3Storage struct {
 //   - S3_BUCKET (required)
 //   - S3_REGION (default: us-west-2)
 //   - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (optional; falls back to default credential chain)
+//   - S3_FORCE_PATH_STYLE (optional boolean, default true when AWS_ENDPOINT_URL
+//     is set; matches the pre-existing always-path-style behavior needed by
+//     MinIO. Set to false for backends that require virtual-hosted-style
+//     requests instead, e.g. Tencent COS, which rejects path-style with
+//     PathStyleDomainForbidden)
 //   - S3_KEY_PREFIX (optional; surrounding whitespace and leading/trailing
 //     slashes are trimmed. Set it before the first upload — changing it
 //     later does not migrate already-uploaded objects: downloads/presigns
@@ -78,14 +85,17 @@ func NewS3StorageFromEnv() *S3Storage {
 
 	cdnDomain := os.Getenv("CLOUDFRONT_DOMAIN")
 
+	forcePathStyle := parseForcePathStyle(os.Getenv("S3_FORCE_PATH_STYLE"))
+
 	endpointURL := os.Getenv("AWS_ENDPOINT_URL")
 	s3Opts := []func(*s3.Options){}
 	if endpointURL != "" {
 		s3Opts = append(s3Opts, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(endpointURL)
-			o.UsePathStyle = true
+			o.UsePathStyle = forcePathStyle
 		})
 	}
+	virtualHostedStyle := endpointURL != "" && !forcePathStyle
 
 	keyPrefix := normalizeKeyPrefix(os.Getenv("S3_KEY_PREFIX"))
 	if keyPrefixCollidesWithLogicalRoot(keyPrefix) {
@@ -101,15 +111,31 @@ func NewS3StorageFromEnv() *S3Storage {
 		)
 	}
 
-	slog.Info("S3 storage initialized", "bucket", bucket, "region", region, "cdn_domain", cdnDomain, "endpoint_url", endpointURL, "key_prefix", keyPrefix)
+	slog.Info("S3 storage initialized", "bucket", bucket, "region", region, "cdn_domain", cdnDomain, "endpoint_url", endpointURL, "virtual_hosted_style", virtualHostedStyle, "key_prefix", keyPrefix)
 	return &S3Storage{
-		client:      s3.NewFromConfig(cfg, s3Opts...),
-		bucket:      bucket,
-		region:      region,
-		cdnDomain:   cdnDomain,
-		endpointURL: endpointURL,
-		keyPrefix:   keyPrefix,
+		client:             s3.NewFromConfig(cfg, s3Opts...),
+		bucket:             bucket,
+		region:             region,
+		cdnDomain:          cdnDomain,
+		endpointURL:        endpointURL,
+		virtualHostedStyle: virtualHostedStyle,
+		keyPrefix:          keyPrefix,
 	}
+}
+
+// parseForcePathStyle parses S3_FORCE_PATH_STYLE, defaulting to true (the
+// pre-existing always-path-style behavior) when unset or unparseable so
+// existing MinIO-style deployments are unaffected.
+func parseForcePathStyle(raw string) bool {
+	if raw == "" {
+		return true
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		slog.Warn("S3_FORCE_PATH_STYLE is not a valid boolean, defaulting to true (path-style)", "value", raw)
+		return true
+	}
+	return parsed
 }
 
 func (s *S3Storage) CdnDomain() string {
@@ -161,6 +187,21 @@ func keyPrefixHasUnsafeCharacters(prefix string) bool {
 	return false
 }
 
+// splitEndpointURL splits a configured AWS_ENDPOINT_URL into scheme and
+// host, e.g. "https://cos.ap-guangzhou.myqcloud.com/" ->
+// ("https", "cos.ap-guangzhou.myqcloud.com"). ok is false when the endpoint
+// has no recognized scheme.
+func splitEndpointURL(endpoint string) (scheme, host string, ok bool) {
+	trimmed := strings.TrimRight(endpoint, "/")
+	if rest, found := strings.CutPrefix(trimmed, "https://"); found {
+		return "https", rest, true
+	}
+	if rest, found := strings.CutPrefix(trimmed, "http://"); found {
+		return "http", rest, true
+	}
+	return "", "", false
+}
+
 // objectKey applies the configured key prefix (if any) to a logical key,
 // producing the actual key used against the S3 API. Callers throughout the
 // rest of the codebase only ever deal in logical keys (e.g. "users/u1/f.png");
@@ -202,9 +243,18 @@ func (s *S3Storage) KeyFromURL(rawURL string) string {
 // physically stored in S3, i.e. including the configured key prefix (if any).
 func (s *S3Storage) rawKeyFromURL(rawURL string) string {
 	if s.endpointURL != "" {
-		prefix := strings.TrimRight(s.endpointURL, "/") + "/" + s.bucket + "/"
-		if strings.HasPrefix(rawURL, prefix) {
-			return strings.TrimPrefix(rawURL, prefix)
+		// Recognize both URL shapes regardless of the current
+		// S3_FORCE_PATH_STYLE setting, so a stored URL keeps resolving even
+		// after an operator flips that setting post-deployment.
+		if scheme, host, ok := splitEndpointURL(s.endpointURL); ok {
+			vhPrefix := scheme + "://" + s.bucket + "." + host + "/"
+			if strings.HasPrefix(rawURL, vhPrefix) {
+				return strings.TrimPrefix(rawURL, vhPrefix)
+			}
+		}
+		psPrefix := strings.TrimRight(s.endpointURL, "/") + "/" + s.bucket + "/"
+		if strings.HasPrefix(rawURL, psPrefix) {
+			return strings.TrimPrefix(rawURL, psPrefix)
 		}
 	}
 
@@ -341,6 +391,11 @@ func (s *S3Storage) uploadedURL(key string) string {
 		return fmt.Sprintf("https://%s/%s", s.cdnDomain, key)
 	}
 	if s.endpointURL != "" {
+		if s.virtualHostedStyle {
+			if scheme, host, ok := splitEndpointURL(s.endpointURL); ok {
+				return fmt.Sprintf("%s://%s.%s/%s", scheme, s.bucket, host, key)
+			}
+		}
 		return fmt.Sprintf("%s/%s/%s", strings.TrimRight(s.endpointURL, "/"), s.bucket, key)
 	}
 	if strings.Contains(s.bucket, ".") {
