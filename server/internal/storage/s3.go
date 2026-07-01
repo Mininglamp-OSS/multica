@@ -35,8 +35,11 @@ type S3Storage struct {
 //   - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (optional; falls back to default credential chain)
 //   - S3_KEY_PREFIX (optional; surrounding whitespace and leading/trailing
 //     slashes are trimmed. Set it before the first upload — changing it
-//     later does not migrate already-uploaded objects, so they become
-//     unreachable under the new prefix until manually copied)
+//     later does not migrate already-uploaded objects: downloads/presigns
+//     against them start 404ing, and Delete silently no-ops on them since
+//     S3 DeleteObject does not error on a missing key, orphaning the real
+//     object. Only manually copying them under the new prefix restores
+//     access)
 func NewS3StorageFromEnv() *S3Storage {
 	bucket := os.Getenv("S3_BUCKET")
 	if bucket == "" {
@@ -85,6 +88,12 @@ func NewS3StorageFromEnv() *S3Storage {
 	}
 
 	keyPrefix := normalizeKeyPrefix(os.Getenv("S3_KEY_PREFIX"))
+	if keyPrefixCollidesWithLogicalRoot(keyPrefix) {
+		slog.Warn(
+			"S3_KEY_PREFIX matches an existing top-level object key segment (\"users\" or \"workspaces\") — this corrupts the intermediate logical key KeyFromURL returns for objects uploaded before the prefix was set, even though S3 reads/writes still work because objectKey re-applies the same segment. Choose a different prefix.",
+			"value", keyPrefix,
+		)
+	}
 
 	slog.Info("S3 storage initialized", "bucket", bucket, "region", region, "cdn_domain", cdnDomain, "endpoint_url", endpointURL, "key_prefix", keyPrefix)
 	return &S3Storage{
@@ -115,6 +124,16 @@ func looksLikeS3Hostname(bucket string) bool {
 // slash-only value normalizes to "" (no prefix).
 func normalizeKeyPrefix(raw string) string {
 	return strings.Trim(strings.TrimSpace(raw), "/")
+}
+
+// keyPrefixCollidesWithLogicalRoot reports whether prefix matches one of the
+// fixed top-level segments the uploader already writes objects under (see
+// file.go). Such a prefix corrupts the intermediate logical key that
+// KeyFromURL returns for objects uploaded before the prefix was configured —
+// S3 reads/writes still work because objectKey re-applies the identical
+// segment, but the logical key briefly round-trips through a wrong value.
+func keyPrefixCollidesWithLogicalRoot(prefix string) bool {
+	return prefix == "users" || prefix == "workspaces"
 }
 
 // objectKey applies the configured key prefix (if any) to a logical key,

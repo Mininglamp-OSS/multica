@@ -293,6 +293,25 @@ func TestNormalizeKeyPrefix(t *testing.T) {
 	}
 }
 
+func TestKeyPrefixCollidesWithLogicalRoot(t *testing.T) {
+	cases := []struct {
+		prefix string
+		want   bool
+	}{
+		{prefix: "", want: false},
+		{prefix: "multica-prod", want: false},
+		{prefix: "users", want: true},
+		{prefix: "workspaces", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.prefix, func(t *testing.T) {
+			if got := keyPrefixCollidesWithLogicalRoot(tc.prefix); got != tc.want {
+				t.Fatalf("keyPrefixCollidesWithLogicalRoot(%q) = %v, want %v", tc.prefix, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestS3StoragePresignGet_AppliesConfiguredPrefix(t *testing.T) {
 	store := &S3Storage{
 		client: s3.New(s3.Options{
