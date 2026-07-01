@@ -17,13 +17,28 @@ import (
 )
 
 // newS3TestStorage connects to a real S3-compatible endpoint (e.g. local
-// MinIO) via S3_TEST_ENDPOINT_URL, creates a throwaway bucket, and skips
+// MinIO, or a real Tencent COS bucket) via S3_TEST_ENDPOINT_URL, and skips
 // when unset so `go test ./...` keeps working without any external
 // dependency — mirrors newRedisTestClient in internal/auth/pat_cache_test.go.
 //
-// Local dev: `docker run -p 9000:9000 -e MINIO_ROOT_USER=minioadmin
-// -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data`, then
-// `S3_TEST_ENDPOINT_URL=http://localhost:9000 go test ./internal/storage/...`.
+// Local dev against MinIO (path-style, the default): `docker run -p 9000:9000
+// -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin
+// minio/minio server /data`, then `S3_TEST_ENDPOINT_URL=http://localhost:9000
+// go test ./internal/storage/...`. When S3_TEST_BUCKET is unset a throwaway
+// bucket is created and torn down automatically, which MinIO allows.
+//
+// Against a real backend that requires virtual-hosted-style requests (e.g.
+// Tencent COS, which rejects path-style with PathStyleDomainForbidden — see
+// S3_FORCE_PATH_STYLE), set S3_TEST_FORCE_PATH_STYLE=false and
+// S3_TEST_BUCKET to an existing bucket you own (bucket create/delete is
+// skipped when S3_TEST_BUCKET is set, since COS bucket naming/permissions
+// don't suit ephemeral throwaway buckets the way MinIO's do):
+//
+//	S3_TEST_ENDPOINT_URL=https://cos.ap-guangzhou.myqcloud.com \
+//	S3_TEST_FORCE_PATH_STYLE=false \
+//	S3_TEST_BUCKET=my-bucket-1250000000 \
+//	S3_TEST_ACCESS_KEY_ID=... S3_TEST_SECRET_ACCESS_KEY=... \
+//	go test ./internal/storage/... -run Integration -v
 func newS3TestStorage(t *testing.T, keyPrefix string) *S3Storage {
 	t.Helper()
 	endpoint := os.Getenv("S3_TEST_ENDPOINT_URL")
@@ -38,18 +53,23 @@ func newS3TestStorage(t *testing.T, keyPrefix string) *S3Storage {
 	if secretKey == "" {
 		secretKey = "minioadmin"
 	}
+	forcePathStyle := parseForcePathStyle(os.Getenv("S3_TEST_FORCE_PATH_STYLE"))
 
 	client := s3.New(s3.Options{
 		Region:       "us-east-1",
 		Credentials:  aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
 		BaseEndpoint: aws.String(endpoint),
-		UsePathStyle: true,
+		UsePathStyle: forcePathStyle,
 	})
 
 	ctx := context.Background()
-	bucket := "multica-test-" + uuid.NewString()
-	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Skipf("S3_TEST_ENDPOINT_URL unreachable or bucket creation failed: %v", err)
+	bucket := os.Getenv("S3_TEST_BUCKET")
+	ownsBucket := bucket == ""
+	if ownsBucket {
+		bucket = "multica-test-" + uuid.NewString()
+		if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+			t.Skipf("S3_TEST_ENDPOINT_URL unreachable or bucket creation failed: %v", err)
+		}
 	}
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
@@ -59,15 +79,18 @@ func newS3TestStorage(t *testing.T, keyPrefix string) *S3Storage {
 				client.DeleteObject(cleanupCtx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: obj.Key})
 			}
 		}
-		client.DeleteBucket(cleanupCtx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
+		if ownsBucket {
+			client.DeleteBucket(cleanupCtx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
+		}
 	})
 
 	return &S3Storage{
-		client:      client,
-		bucket:      bucket,
-		region:      "us-east-1",
-		endpointURL: endpoint,
-		keyPrefix:   keyPrefix,
+		client:             client,
+		bucket:             bucket,
+		region:             "us-east-1",
+		endpointURL:        endpoint,
+		virtualHostedStyle: !forcePathStyle,
+		keyPrefix:          keyPrefix,
 	}
 }
 
